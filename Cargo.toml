@@ -6,4 +6,10 @@ edition = "2024"
 [dependencies]
 collo = { path = "collo" }
 cosmic_undo_2 = { version = "0.2.0", default-features = false }
+directories = "6"
 eframe = { version = "0.37.0", features = ["default"] }
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+tempfile = "3.27.0"
+toml = "1.1.8"
+unicode-normalization = "0.1.26"

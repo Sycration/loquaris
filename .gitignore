@@ -1,5 +1,5 @@
 # Added by Cargo: contains compiled binaries, artifacts, and dependencies
-/target/
+target/
 
 # For Applications: Remove this if you are building a Library
 # Cargo.lock
@@ -15,3 +15,6 @@ rustc-ice-*.txt
 
 # Cargo mutants testing data (if using cargo-mutants)
 **/mutants.out*/
+
+# python scripts
+__pycache__/
