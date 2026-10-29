@@ -27,6 +27,13 @@ pub enum Action {
     MoveToTeacher,
     MoveEntryUp,
     MoveEntryDown,
+    RecorderPlayPause,
+    RecorderRecord,
+    RecorderStopPlayback,
+    RecorderSeekBack,
+    RecorderSeekForward,
+    RecorderSeekStart,
+    RecorderSeekEnd,
 }
 
 struct Binding {
@@ -87,7 +94,42 @@ impl Action {
             Self::MoveToTeacher => "move_to_teacher",
             Self::MoveEntryUp => "move_entry_up",
             Self::MoveEntryDown => "move_entry_down",
+            Self::RecorderPlayPause => "recorder_play_pause",
+            Self::RecorderRecord => "recorder_record",
+            Self::RecorderStopPlayback => "recorder_stop_playback",
+            Self::RecorderSeekBack => "recorder_seek_back",
+            Self::RecorderSeekForward => "recorder_seek_forward",
+            Self::RecorderSeekStart => "recorder_seek_start",
+            Self::RecorderSeekEnd => "recorder_seek_end",
         }
+    }
+
+    fn recorder_only(self) -> bool {
+        matches!(
+            self,
+            Self::RecorderPlayPause
+                | Self::RecorderRecord
+                | Self::RecorderStopPlayback
+                | Self::RecorderSeekBack
+                | Self::RecorderSeekForward
+                | Self::RecorderSeekStart
+                | Self::RecorderSeekEnd
+        )
+    }
+
+    fn shared(self) -> bool {
+        matches!(
+            self,
+            Self::Undo
+                | Self::Redo
+                | Self::RedoAlternative
+                | Self::SaveProject
+                | Self::SaveProjectAs
+        )
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        self.shared() || other.shared() || self.recorder_only() == other.recorder_only()
     }
 }
 
@@ -217,6 +259,41 @@ impl Default for Registry {
                         Key::ArrowDown,
                     ),
                 },
+                Binding {
+                    action: Action::RecorderPlayPause,
+                    label: "Play / pause",
+                    shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::Space),
+                },
+                Binding {
+                    action: Action::RecorderRecord,
+                    label: "Start / stop recording",
+                    shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::R),
+                },
+                Binding {
+                    action: Action::RecorderStopPlayback,
+                    label: "Stop playback",
+                    shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::S),
+                },
+                Binding {
+                    action: Action::RecorderSeekBack,
+                    label: "Seek backward 5 seconds",
+                    shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::ArrowLeft),
+                },
+                Binding {
+                    action: Action::RecorderSeekForward,
+                    label: "Seek forward 5 seconds",
+                    shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::ArrowRight),
+                },
+                Binding {
+                    action: Action::RecorderSeekStart,
+                    label: "Seek to beginning",
+                    shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::Home),
+                },
+                Binding {
+                    action: Action::RecorderSeekEnd,
+                    label: "Seek to end",
+                    shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::End),
+                },
             ],
             path: None,
             stored: BTreeMap::new(),
@@ -270,10 +347,10 @@ impl Registry {
                 }
             }
             for (index, binding) in registry.bindings.iter().enumerate() {
-                if registry.bindings[..index]
-                    .iter()
-                    .any(|other| Self::same_shortcut(other.shortcut, binding.shortcut))
-                {
+                if registry.bindings[..index].iter().any(|other| {
+                    other.action.overlaps(binding.action)
+                        && Self::same_shortcut(other.shortcut, binding.shortcut)
+                }) {
                     return Err(format!("Duplicate shortcut for {}.", binding.label));
                 }
             }
@@ -340,7 +417,8 @@ impl Registry {
     }
 
     fn valid_shortcut(action: Action, shortcut: KeyboardShortcut) -> bool {
-        shortcut.modifiers.command
+        (action.recorder_only() && shortcut.logical_key != Key::Escape)
+            || shortcut.modifiers.command
             || shortcut.modifiers.ctrl
             || shortcut.modifiers.mac_cmd
             || (action == Action::StopEditing
@@ -355,21 +433,59 @@ impl Registry {
 
     /// Consume only exact matches, so Ctrl+Shift+Z cannot also invoke Ctrl+Z.
     pub fn take_actions(&self, input: &mut InputState, editing_entry: bool) -> Vec<Action> {
+        self.take_filtered_actions(input, |action| {
+            !action.recorder_only() && (action != Action::StopEditing || editing_entry)
+        })
+    }
+
+    pub fn take_recorder_actions(&self, input: &mut InputState) -> Vec<Action> {
+        self.take_filtered_actions(input, |action| action.shared() || action.recorder_only())
+    }
+
+    pub fn take_recorder_project_actions(&self, input: &mut InputState) -> Vec<Action> {
+        self.take_filtered_actions(input, Action::shared)
+    }
+
+    /// Dispatch project history shortcuts in windows that don't support other actions.
+    pub fn take_history_actions(&self, input: &mut InputState) -> Vec<Action> {
+        self.take_filtered_actions(input, |action| {
+            matches!(
+                action,
+                Action::Undo | Action::Redo | Action::RedoAlternative
+            )
+        })
+    }
+
+    fn take_filtered_actions(
+        &self,
+        input: &mut InputState,
+        allowed: impl Fn(Action) -> bool,
+    ) -> Vec<Action> {
         let mut actions = Vec::new();
         input.events.retain(|event| {
             if let Event::Key {
                 key,
                 modifiers,
                 pressed: true,
+                repeat,
                 ..
             } = event
             {
                 if let Some(binding) = self.bindings.iter().find(|binding| {
                     binding.shortcut.logical_key == *key
                         && modifiers.matches_exact(binding.shortcut.modifiers)
-                        && (binding.action != Action::StopEditing || editing_entry)
+                        && allowed(binding.action)
                 }) {
-                    actions.push(binding.action);
+                    if !*repeat
+                        || !matches!(
+                            binding.action,
+                            Action::RecorderPlayPause
+                                | Action::RecorderRecord
+                                | Action::RecorderStopPlayback
+                        )
+                    {
+                        actions.push(binding.action);
+                    }
                     return false;
                 }
                 // The application owns undo history; do not let egui's independent
@@ -390,7 +506,9 @@ impl Registry {
             return Err("Use Ctrl or Command with a key.");
         }
         if self.bindings.iter().enumerate().any(|(other, binding)| {
-            other != index && Self::same_shortcut(binding.shortcut, shortcut)
+            other != index
+                && binding.action.overlaps(self.bindings[index].action)
+                && Self::same_shortcut(binding.shortcut, shortcut)
         }) {
             return Err("That shortcut is already assigned.");
         }
@@ -472,7 +590,10 @@ impl Editor {
                     egui::Frame::new().inner_margin(12.0).show(ui, |ui| {
                         ui.heading("Keybinds");
                         ui.label("Choose a shortcut to change it. Press Escape to cancel.");
+                        ui.label("Recorder shortcuts apply only in the recorder window.");
+                        ui.label("Project Save, Undo and Redo also work in the recorder.");
                         ui.add_space(12.0);
+                        ui.strong("Project and transcript");
 
                         let column_width = ((ui.available_width() - 16.0) / 2.0).max(120.0);
                         egui::Grid::new("keybinds_table")
@@ -491,6 +612,13 @@ impl Editor {
                                 ui.end_row();
 
                                 for (index, binding) in registry.bindings.iter().enumerate() {
+                                    if binding.action == Action::RecorderPlayPause {
+                                        ui.add_space(8.0);
+                                        ui.end_row();
+                                        ui.strong("Recorder");
+                                        ui.label("");
+                                        ui.end_row();
+                                    }
                                     ui.add_sized(
                                         [column_width, 28.0],
                                         egui::Label::new(binding.label),
@@ -775,5 +903,110 @@ mod tests {
             vec![Action::StopEditing]
         );
         assert_eq!(input.events.len(), 1);
+    }
+
+    #[test]
+    fn history_only_dispatch_respects_custom_bindings() {
+        let mut registry = Registry::default();
+        let undo = registry
+            .bindings
+            .iter()
+            .position(|binding| binding.action == Action::Undo)
+            .unwrap();
+        registry
+            .set(undo, KeyboardShortcut::new(Modifiers::COMMAND, Key::U))
+            .unwrap();
+        let event = |key, modifiers| Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let mut input = InputState::default();
+        input.events.push(event(Key::U, Modifiers::COMMAND));
+        input
+            .events
+            .push(event(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT));
+        input.events.push(event(Key::S, Modifiers::COMMAND));
+        assert_eq!(
+            registry.take_history_actions(&mut input),
+            vec![Action::Undo, Action::Redo]
+        );
+        assert_eq!(input.events.len(), 1);
+    }
+
+    #[test]
+    fn recorder_bindings_are_scoped_persisted_and_allow_main_only_overlap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.toml");
+        let mut registry = Registry::load_from(&path);
+        let record = index(&registry, Action::RecorderRecord);
+        let main = registry.bindings[index(&registry, Action::SwitchLanguage)].shortcut;
+        registry.set(record, main).unwrap();
+        assert!(
+            registry
+                .set(
+                    record,
+                    registry.bindings[index(&registry, Action::SaveProject)].shortcut
+                )
+                .is_err()
+        );
+        registry.persist();
+        let loaded = Registry::load_from(&path);
+        assert!(loaded.storage_error.is_none());
+        assert_eq!(
+            loaded.bindings[index(&loaded, Action::RecorderRecord)].shortcut,
+            main
+        );
+        let event = || Event::Key {
+            key: main.logical_key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: main.modifiers,
+        };
+        let mut input = InputState::default();
+        input.events.push(event());
+        assert_eq!(
+            loaded.take_actions(&mut input, false),
+            vec![Action::SwitchLanguage]
+        );
+        input.events.push(event());
+        assert_eq!(
+            loaded.take_recorder_actions(&mut input),
+            vec![Action::RecorderRecord]
+        );
+        input.events.push(Event::Key {
+            key: Key::S,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        });
+        assert_eq!(
+            loaded.take_recorder_actions(&mut input),
+            vec![Action::SaveProject]
+        );
+    }
+
+    #[test]
+    fn recorder_toggle_shortcuts_ignore_key_repeat() {
+        let registry = Registry::default();
+        let mut input = InputState::default();
+        for key in [Key::Space, Key::R, Key::S, Key::ArrowRight] {
+            input.events.push(Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: true,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        assert_eq!(
+            registry.take_recorder_actions(&mut input),
+            vec![Action::RecorderSeekForward]
+        );
+        assert!(input.events.is_empty());
     }
 }

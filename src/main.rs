@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio;
+mod audio_devices;
+mod export_pdf;
 mod keybinds;
 mod macronize;
 mod parsing_review;
@@ -90,6 +93,8 @@ struct Entry {
     participant: Participant,
     language: Language,
     text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audio: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -110,6 +115,16 @@ enum TextTarget {
 
 #[derive(Clone)]
 enum Command {
+    SetExportSettings {
+        before: export_pdf::Settings,
+        after: export_pdf::Settings,
+    },
+    SetAudio {
+        lesson: usize,
+        index: usize,
+        before: Option<String>,
+        after: Option<String>,
+    },
     EditText {
         target: TextTarget,
         before: String,
@@ -187,6 +202,9 @@ enum FileAction {
 }
 
 struct App {
+    audio_editor: Option<audio::Editor>,
+    export_window: export_pdf::Window,
+    export_settings: export_pdf::Settings,
     project_open: bool,
     recent_projects: recent_projects::RecentProjects,
     project_name: String,
@@ -218,6 +236,9 @@ impl Default for App {
         let lessons = Vec::new();
         let saved_project = project::Project::new(String::new(), String::new(), lessons.clone());
         Self {
+            audio_editor: None,
+            export_window: export_pdf::Window::default(),
+            export_settings: export_pdf::Settings::default(),
             project_open: false,
             recent_projects: recent_projects::RecentProjects::default(),
             project_name: String::new(),
@@ -356,11 +377,13 @@ impl App {
     }
 
     fn project_snapshot(&self) -> project::Project {
-        project::Project::new(
+        let mut project = project::Project::new(
             self.project_name.clone(),
             self.l1_name.clone(),
             self.lessons.clone(),
-        )
+        );
+        project.export_settings = self.export_settings.clone();
+        project
     }
 
     fn is_dirty(&self) -> bool {
@@ -439,10 +462,13 @@ impl App {
     }
 
     fn replace_project(&mut self, project: project::Project, path: Option<std::path::PathBuf>) {
+        self.audio_editor = None;
+        self.export_window = export_pdf::Window::default();
         self.project_open = true;
         self.project_name = project.name.clone();
         self.l1_name = project.l1_name.clone();
         self.lessons = project.lessons.clone();
+        self.export_settings = project.export_settings.clone();
         self.saved_project = project;
         self.project_path = path;
         self.active_lesson = 0;
@@ -531,6 +557,9 @@ impl App {
             return;
         }
         self.project_open = false;
+        self.audio_editor = None;
+        self.export_window = export_pdf::Window::default();
+        self.export_settings = export_pdf::Settings::default();
         self.project_name.clear();
         self.l1_name.clear();
         self.saved_project = project::Project::new(String::new(), String::new(), Vec::new());
@@ -569,6 +598,7 @@ impl App {
             .selected_entry
             .map_or(lesson.entries.len(), |(_, entry)| entry + 1);
         let entry = Entry {
+            audio: None,
             participant,
             language,
             text: String::new(),
@@ -1002,6 +1032,13 @@ impl App {
     }
 
     fn undo(&mut self) {
+        if self
+            .audio_editor
+            .as_mut()
+            .is_some_and(|editor| editor.block_history_while_recording())
+        {
+            return;
+        }
         let actions: Vec<_> = self
             .history
             .undo()
@@ -1016,6 +1053,13 @@ impl App {
     }
 
     fn redo(&mut self) {
+        if self
+            .audio_editor
+            .as_mut()
+            .is_some_and(|editor| editor.block_history_while_recording())
+        {
+            return;
+        }
         let actions: Vec<_> = self
             .history
             .redo()
@@ -1030,10 +1074,31 @@ impl App {
     }
 
     fn apply_command(&mut self, command: Command, forward: bool) {
+        if matches!(
+            &command,
+            Command::InsertLesson { .. }
+                | Command::InsertEntry { .. }
+                | Command::DeleteEntry { .. }
+                | Command::MoveEntry { .. }
+                | Command::BulkEntries { .. }
+        ) {
+            self.audio_editor = None;
+        }
         if !matches!(&command, Command::EditText { .. }) {
             self.editing_entry = None;
         }
         match command {
+            Command::SetExportSettings { before, after } => {
+                self.export_settings = if forward { after } else { before };
+            }
+            Command::SetAudio {
+                lesson,
+                index,
+                before,
+                after,
+            } => {
+                self.lessons[lesson].entries[index].audio = if forward { after } else { before };
+            }
             Command::EditText {
                 target,
                 before,
@@ -1222,6 +1287,15 @@ impl App {
                     lesson.entries = entries;
                 }
                 self.set_selection(selection, primary);
+            }
+        }
+        if let Some(editor) = &mut self.audio_editor {
+            if let Some(entry) = self
+                .lessons
+                .get(editor.target.0)
+                .and_then(|lesson| lesson.entries.get(editor.target.1))
+            {
+                editor.sync_entry(entry);
             }
         }
         if self.selected_entry.is_none() {
@@ -1421,7 +1495,10 @@ impl App {
 
     fn handle_shortcuts(&mut self, ui: &mut egui::Ui) -> Option<FileAction> {
         let mut file_action = None;
-        if !self.keybind_editor.is_recording() && self.parsing_review.is_none() {
+        if !self.keybind_editor.is_recording()
+            && self.parsing_review.is_none()
+            && self.audio_editor.is_none()
+        {
             let actions = ui.input_mut(|input| {
                 self.keybinds
                     .take_actions(input, self.editing_entry.is_some())
@@ -1477,6 +1554,15 @@ impl App {
                             });
                         }
                     }
+                    keybinds::Action::RecorderPlayPause
+                    | keybinds::Action::RecorderRecord
+                    | keybinds::Action::RecorderStopPlayback
+                    | keybinds::Action::RecorderSeekBack
+                    | keybinds::Action::RecorderSeekForward
+                    | keybinds::Action::RecorderSeekStart
+                    | keybinds::Action::RecorderSeekEnd => {
+                        unreachable!("recorder shortcuts are scoped to the recorder")
+                    }
                 }
             }
         }
@@ -1518,6 +1604,10 @@ impl eframe::App for App {
                 if ui.button("Save as…").clicked() {
                     ui.close();
                     file_action = Some(FileAction::SaveAs);
+                }
+                if ui.button("Export…").clicked() {
+                    ui.close();
+                    self.export_window.open = true;
                 }
                 if ui.button("Close project").clicked() {
                     ui.close();
@@ -1611,6 +1701,7 @@ impl eframe::App for App {
         let mut selected = None;
         let mut pending_entry_action = None;
         let mut pending_edit = None;
+        let mut pending_audio = None;
         let mut pending_selection = None;
         let lesson_count = self.lessons.len();
         let multiple_entries = self
@@ -1767,7 +1858,14 @@ impl eframe::App for App {
                                                                         },
                                                                     );
                                                                 }
-                                                                if response.clicked && !focus {
+                                                                if response.requests_selection(
+                                                                    self.editing_entry
+                                                                        == Some((
+                                                                            lesson_index,
+                                                                            entry_index,
+                                                                        )),
+                                                                ) && !focus
+                                                                {
                                                                     pending_selection = Some((
                                                                         (lesson_index, entry_index),
                                                                         ui.input(|input| {
@@ -1797,6 +1895,12 @@ impl eframe::App for App {
                                                                 }
                                                                 if response.edit_requested {
                                                                     pending_edit = Some((
+                                                                        lesson_index,
+                                                                        entry_index,
+                                                                    ));
+                                                                }
+                                                                if response.audio_requested {
+                                                                    pending_audio = Some((
                                                                         lesson_index,
                                                                         entry_index,
                                                                     ));
@@ -1859,6 +1963,12 @@ impl eframe::App for App {
             self.selected_entry = Some((lesson, index));
             self.edit_selected();
             selected = Some(lesson);
+        }
+        if let Some((lesson, index)) = pending_audio {
+            self.audio_editor = Some(audio::Editor::new(
+                (lesson, index),
+                self.lessons[lesson].entries[index].clone(),
+            ));
         }
 
         if let Some((lesson, index, action)) = pending_entry_action {
@@ -2057,8 +2167,85 @@ impl eframe::App for App {
                 None => self.parsing_review = Some(review),
             }
         }
+        if let Some(mut editor) = self.audio_editor.take() {
+            let outcome = editor.show(ui.ctx(), &self.l1_name, &self.keybinds);
+            let mut valid = true;
+            if let Some(after) = outcome.changed {
+                let (lesson, index) = editor.target;
+                if let Some(entry) = self
+                    .lessons
+                    .get(lesson)
+                    .and_then(|lesson| lesson.entries.get(index))
+                {
+                    if *entry == editor.original && entry.audio != after {
+                        let command = Command::SetAudio {
+                            lesson,
+                            index,
+                            before: entry.audio.clone(),
+                            after,
+                        };
+                        self.apply_command(command.clone(), true);
+                        self.history.push(command);
+                        editor.original.audio = self.lessons[lesson].entries[index].audio.clone();
+                    } else if *entry != editor.original && editor.original.audio != after {
+                        Self::show_file_error(
+                            "The entry changed while the audio window was open. The clip was not applied.",
+                        );
+                        valid = false;
+                    }
+                } else {
+                    valid = false;
+                }
+            }
+            if !outcome.closed && valid {
+                self.audio_editor = Some(editor);
+            }
+            if valid {
+                for action in outcome.actions {
+                    match action {
+                        keybinds::Action::Undo => self.undo(),
+                        keybinds::Action::Redo | keybinds::Action::RedoAlternative => self.redo(),
+                        keybinds::Action::SaveProject => file_action = Some(FileAction::Save),
+                        keybinds::Action::SaveProjectAs => file_action = Some(FileAction::SaveAs),
+                        _ => unreachable!("only project actions leave the recorder"),
+                    }
+                    ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+                    ui.ctx()
+                        .request_repaint_of(egui::ViewportId::from_hash_of("entry-audio"));
+                }
+            }
+        }
         if let Some(action) = self.show_project_details(ui.ctx()) {
             file_action = Some(action);
+        }
+        let export_directory = self.dialog_directory();
+        let before_export = self.export_settings.clone();
+        let export_actions = self.export_window.show(
+            ui.ctx(),
+            &self.project_name,
+            &self.l1_name,
+            &self.lessons,
+            &mut self.export_settings,
+            &self.keybinds,
+            export_directory.as_deref(),
+            self.project_path.as_deref(),
+        );
+        if self.export_settings != before_export {
+            self.history.push(Command::SetExportSettings {
+                before: before_export,
+                after: self.export_settings.clone(),
+            });
+            ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+        }
+        for action in export_actions {
+            match action {
+                keybinds::Action::Undo => self.undo(),
+                keybinds::Action::Redo | keybinds::Action::RedoAlternative => self.redo(),
+                _ => unreachable!("only history actions are dispatched in the export window"),
+            }
+            ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+            ui.ctx()
+                .request_repaint_of(egui::ViewportId::from_hash_of("export-pdf"));
         }
         if let Some(action) = file_action {
             match action {
@@ -2174,7 +2361,17 @@ struct CardResponse {
     clicked: bool,
     right_clicked: bool,
     edit_requested: bool,
+    audio_requested: bool,
     action: Option<MenuAction>,
+}
+
+impl CardResponse {
+    fn requests_selection(&self, editing: bool) -> bool {
+        self.clicked
+            && (self.right_clicked
+                || !editing
+                || !(self.text.clicked() || self.text.drag_started() || self.text.dragged()))
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -2229,7 +2426,7 @@ fn card(
                     egui::Layout::right_to_left(egui::Align::Center)
                 };
                 ui.with_layout(layout, |ui| {
-                    ui.set_max_width((width - 58.0).max(8.0));
+                    ui.set_max_width((width - 98.0).max(8.0));
                     ui.label(
                         RichText::new(label)
                             .font(entry_font(entry.language, 12.0))
@@ -2299,6 +2496,7 @@ fn card(
         });
     let text = text_response.expect("card text is always shown");
     let mut edit_requested = false;
+    let mut audio_requested = false;
     if frame.response.container_contains_pointer() {
         let rect = egui::Rect::from_min_size(
             egui::pos2(
@@ -2312,6 +2510,45 @@ fn card(
             .put(rect, egui::Button::new(RichText::new("✎").size(25.0)))
             .on_hover_text("Edit entry")
             .clicked();
+        let audio_rect = rect.translate(egui::vec2(-40.0, 0.0));
+        let mut audio_overlay = ui.new_child(egui::UiBuilder::new().max_rect(audio_rect));
+        let response = audio_overlay
+            .put(audio_rect, egui::Button::new(""))
+            .on_hover_text(if entry.audio.is_some() {
+                "Edit attached audio"
+            } else {
+                "Record or import audio"
+            });
+        audio_requested = response.clicked();
+        let center = audio_rect.center();
+        let point = |x, y| center + egui::vec2(x, y);
+        let color = if entry.audio.is_some() {
+            accent
+        } else {
+            Color32::WHITE
+        };
+        audio_overlay.painter().add(egui::Shape::convex_polygon(
+            vec![
+                point(-11.0, -4.0),
+                point(-6.0, -4.0),
+                point(0.0, -9.0),
+                point(0.0, 9.0),
+                point(-6.0, 4.0),
+                point(-11.0, 4.0),
+            ],
+            color,
+            Stroke::NONE,
+        ));
+        for scale in [1.0, 1.8] {
+            audio_overlay.painter().add(egui::Shape::line(
+                vec![
+                    point(4.0 * scale, -5.0 * scale),
+                    point(6.0 * scale, 0.0),
+                    point(4.0 * scale, 5.0 * scale),
+                ],
+                Stroke::new(1.5, color),
+            ));
+        }
     }
     let mut action = None;
     let right_clicked = frame.response.container_secondary_clicked();
@@ -2422,6 +2659,7 @@ fn card(
         clicked,
         right_clicked,
         edit_requested,
+        audio_requested,
         action,
     }
 }
@@ -2441,6 +2679,7 @@ mod tests {
         ]
         .into_iter()
         .map(|(participant, language, text)| Entry {
+            audio: None,
             participant,
             language,
             text: text.into(),
@@ -2466,6 +2705,95 @@ mod tests {
         assert!(!app.project_open);
         assert!(app.lessons.is_empty());
         assert!(!app.is_dirty());
+    }
+
+    #[test]
+    fn export_settings_are_project_specific_dirty_and_undoable() {
+        let mut app = sample_app();
+        let before = app.export_settings.clone();
+        let mut after = before.clone();
+        after.paper = export_pdf::Paper::Letter;
+        after.font_size = 21.0;
+        after.directory = Some(std::path::PathBuf::from("/exports"));
+        let command = Command::SetExportSettings {
+            before: before.clone(),
+            after: after.clone(),
+        };
+        app.apply_command(command.clone(), true);
+        app.history.push(command);
+        assert!(app.is_dirty());
+        assert_eq!(app.project_snapshot().export_settings, after);
+        app.undo();
+        assert_eq!(app.export_settings, before);
+        assert!(!app.is_dirty());
+        app.redo();
+        assert_eq!(app.export_settings, after);
+        let project = app.project_snapshot();
+        let mut restored = App::default();
+        restored.replace_project(project, None);
+        assert_eq!(restored.export_settings, after);
+        restored.replace_project(sample_app().project_snapshot(), None);
+        assert_eq!(restored.export_settings, export_pdf::Settings::default());
+    }
+
+    #[test]
+    fn entry_audio_is_saved_moved_and_undoable() {
+        let mut app = sample_app();
+        let command = Command::SetAudio {
+            lesson: 0,
+            index: 1,
+            before: None,
+            after: Some("UklGRg==".into()),
+        };
+        app.apply_command(command.clone(), true);
+        app.history.push(command);
+        assert!(app.is_dirty());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audio.toml");
+        app.project_snapshot().save(&path).unwrap();
+        assert_eq!(
+            project::Project::load(&path).unwrap().lessons[0].entries[1]
+                .audio
+                .as_deref(),
+            Some("UklGRg==")
+        );
+        app.undo();
+        assert!(app.lessons[0].entries[1].audio.is_none());
+        app.redo();
+        assert_eq!(app.lessons[0].entries[1].audio.as_deref(), Some("UklGRg=="));
+        app.entry_action(0, 1, EntryAction::MoveDown);
+        assert_eq!(app.lessons[0].entries[2].audio.as_deref(), Some("UklGRg=="));
+        app.undo();
+        assert_eq!(app.lessons[0].entries[1].audio.as_deref(), Some("UklGRg=="));
+    }
+
+    #[test]
+    fn undo_redo_refreshes_open_recorder_clip() {
+        let mut app = sample_app();
+        app.audio_editor = Some(audio::Editor::for_test(
+            (0, 1),
+            app.lessons[0].entries[1].clone(),
+        ));
+        let command = Command::SetAudio {
+            lesson: 0,
+            index: 1,
+            before: None,
+            after: Some("UklGRg==".into()),
+        };
+        app.apply_command(command.clone(), true);
+        app.history.push(command);
+        assert_eq!(
+            app.audio_editor.as_ref().unwrap().clip_for_test(),
+            Some("UklGRg==")
+        );
+        app.undo();
+        assert_eq!(app.audio_editor.as_ref().unwrap().clip_for_test(), None);
+        assert_eq!(app.audio_editor.as_ref().unwrap().original.audio, None);
+        app.redo();
+        assert_eq!(
+            app.audio_editor.as_ref().unwrap().clip_for_test(),
+            Some("UklGRg==")
+        );
     }
 
     #[test]
@@ -2517,11 +2845,13 @@ mod tests {
             expanded: false,
             entries: vec![
                 Entry {
+                    audio: None,
                     participant: Participant::Student,
                     language: Language::Latin,
                     text: "one".into(),
                 },
                 Entry {
+                    audio: None,
                     participant: Participant::Student,
                     language: Language::Latin,
                     text: "two".into(),
@@ -2541,6 +2871,77 @@ mod tests {
         assert_eq!(app.selection(), vec![(0, 1), (0, 4), (1, 0), (1, 1)]);
         app.select_entry((0, 0), egui::Modifiers::NONE, true);
         assert_eq!(app.selection(), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn clicking_and_dragging_in_an_editor_keeps_editing_active() {
+        let ctx = egui::Context::default();
+        configure_fonts(&ctx);
+        let mut app = sample_app();
+        app.lessons[0].entries[0].text = "A long sentence for testing cursor placement".into();
+        app.selected_entry = Some((0, 0));
+        app.editing_entry = Some((0, 0));
+        let text_rect = std::cell::Cell::new(egui::Rect::NOTHING);
+        let was_clicked = std::cell::Cell::new(false);
+        let mut frame = |events: Vec<egui::Event>, focus: bool| {
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(800.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let editing = app.editing_entry == Some((0, 0));
+                    let response = card(
+                        ui,
+                        &mut app.lessons[0].entries[0],
+                        "English",
+                        300.0,
+                        focus,
+                        true,
+                        editing,
+                        EntryMenuOptions::default(),
+                    );
+                    text_rect.set(response.text.rect);
+                    was_clicked.set(response.clicked);
+                    if response.requests_selection(editing) && !focus {
+                        app.select_entry((0, 0), egui::Modifiers::NONE, response.right_clicked);
+                    }
+                });
+            });
+            output.textures_delta.clear();
+        };
+        frame(Vec::new(), true);
+        let pos = text_rect.get().min + egui::vec2(15.0, 8.0);
+        let pointer = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(pos)], false);
+        frame(vec![pointer(true)], false);
+        frame(vec![pointer(false)], false);
+        assert!(was_clicked.get());
+        let end = pos + egui::vec2(60.0, 0.0);
+        frame(vec![pointer(true)], false);
+        frame(vec![egui::Event::PointerMoved(end)], false);
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            false,
+        );
+        frame(vec![egui::Event::Text("X".into())], false);
+        assert_eq!(app.editing_entry, Some((0, 0)));
+        assert!(app.lessons[0].entries[0].text.contains('X'));
+        assert!(!app.lessons[0].entries[0].text.ends_with('X'));
     }
 
     #[test]
@@ -2593,11 +2994,13 @@ mod tests {
             expanded: true,
             entries: vec![
                 Entry {
+                    audio: None,
                     participant: Participant::Student,
                     language: Language::Latin,
                     text: "6".into(),
                 },
                 Entry {
+                    audio: None,
                     participant: Participant::Student,
                     language: Language::Latin,
                     text: "7".into(),
@@ -2675,6 +3078,7 @@ mod tests {
             configure_fonts(&ctx);
             let mut measured = None;
             let mut entry = Entry {
+                audio: None,
                 participant: Participant::Teacher,
                 language,
                 text: text.into(),
@@ -2912,6 +3316,7 @@ mod tests {
         app.lessons.push(Lesson {
             name: "Next".into(),
             entries: vec![Entry {
+                audio: None,
                 participant: Participant::Student,
                 language: Language::Latin,
                 text: "next".into(),

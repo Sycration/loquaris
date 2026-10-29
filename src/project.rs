@@ -39,13 +39,15 @@ pub fn suggested_file_name(name: &str) -> String {
     stem
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Project {
     pub format_version: u32,
     pub name: String,
     pub l1_name: String,
     pub lessons: Vec<Lesson>,
+    #[serde(default)]
+    pub export_settings: crate::export_pdf::Settings,
 }
 
 impl Project {
@@ -55,6 +57,7 @@ impl Project {
             name,
             l1_name,
             lessons,
+            export_settings: crate::export_pdf::Settings::default(),
         }
     }
 
@@ -68,6 +71,7 @@ impl Project {
         if self.lessons.is_empty() {
             return Err("A project must contain at least one lesson.".into());
         }
+        self.export_settings.validate()?;
         for (lesson_index, lesson) in self.lessons.iter().enumerate() {
             for (entry_index, entry) in lesson.entries.iter().enumerate() {
                 if entry.participant == Participant::Student && entry.language != Language::Latin {
@@ -125,11 +129,13 @@ mod tests {
                     expanded: true,
                     entries: vec![
                         Entry {
+                            audio: None,
                             participant: Participant::Teacher,
                             language: Language::L1,
                             text: "A \"hand\"\nwith a newline".into(),
                         },
                         Entry {
+                            audio: None,
                             participant: Participant::Student,
                             language: Language::Latin,
                             text: "duae manūs".into(),
@@ -168,6 +174,39 @@ mod tests {
         changed.name = "Changed".into();
         changed.save(&path).unwrap();
         assert_eq!(Project::load(&path).unwrap(), changed);
+    }
+
+    #[test]
+    fn export_settings_round_trip_and_old_files_get_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("course.toml");
+        let mut project = example();
+        project.export_settings.paper = crate::export_pdf::Paper::Legal;
+        project.export_settings.font_size = 19.5;
+        project.export_settings.directory = Some(dir.path().join("exports"));
+        project.save(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("[export_settings]"));
+        assert_eq!(Project::load(&path).unwrap(), project);
+
+        let mut value: toml::Value = toml::from_str(&saved).unwrap();
+        value.as_table_mut().unwrap().remove("export_settings");
+        std::fs::write(&path, toml::to_string(&value).unwrap()).unwrap();
+        assert_eq!(
+            Project::load(&path).unwrap().export_settings,
+            crate::export_pdf::Settings::default()
+        );
+    }
+
+    #[test]
+    fn invalid_export_font_does_not_overwrite_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("course.toml");
+        let mut project = example();
+        project.save(&path).unwrap();
+        project.export_settings.font_size = f32::NAN;
+        assert!(project.save(&path).is_err());
+        assert_eq!(Project::load(&path).unwrap(), example());
     }
 
     #[test]

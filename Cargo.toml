@@ -4,12 +4,21 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+base64 = "0.22"
 collo = { path = "collo" }
 cosmic_undo_2 = { version = "0.2.0", default-features = false }
+cpal = "0.18"
 directories = "6"
 eframe = { version = "0.37.0", features = ["default"] }
+hound = "3"
+printpdf = { version = "0.12.8", default-features = false }
 rfd = "0.17.2"
+rodio = { version = "0.23", default-features = false, features = ["playback", "hound"] }
 serde = { version = "1.0.229", features = ["derive"] }
 tempfile = "3.27.0"
 toml = "1.1.8"
 unicode-normalization = "0.1.26"
+unicode-segmentation = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18", features = ["pipewire", "pulseaudio", "jack"] }
