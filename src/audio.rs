@@ -59,23 +59,97 @@ pub struct Outcome {
     pub actions: Vec<crate::keybinds::Action>,
 }
 
-fn clip_duration(clip: &str) -> Result<f64, String> {
+pub(crate) fn clip_duration(clip: &str) -> Result<f64, String> {
     let data = STANDARD.decode(clip).map_err(|e| e.to_string())?;
     let reader = hound::WavReader::new(Cursor::new(data)).map_err(|e| e.to_string())?;
     let rate = reader.spec().sample_rate;
-    if rate == 0 {
-        return Err("Invalid sample rate".into());
+    if rate == 0 || reader.spec().channels == 0 {
+        return Err("Invalid WAV format".into());
     }
     Ok(reader.duration() as f64 / rate as f64)
 }
 
-fn wav_decoder(data: Vec<u8>) -> Result<rodio::Decoder<Cursor<Vec<u8>>>, String> {
+pub(crate) fn wav_decoder(data: Vec<u8>) -> Result<rodio::Decoder<Cursor<Vec<u8>>>, String> {
     let header = hound::WavReader::new(Cursor::new(&data))
         .map_err(|e| format!("Could not decode audio: {e}"))?;
     if header.spec().channels == 0 || header.spec().sample_rate == 0 {
         return Err("Could not decode audio: invalid WAV channel count or sample rate.".into());
     }
     rodio::Decoder::try_from(Cursor::new(data)).map_err(|e| format!("Could not decode audio: {e}"))
+}
+
+/// Apply a 250 ms linear fade to each end, using the same gain for every
+/// channel in a frame. Short clips use the lower of the overlapping ramps.
+fn fade_recording(samples: &mut [i16], sample_rate: u32, channels: u16) {
+    let channels = usize::from(channels);
+    if channels == 0 || sample_rate == 0 {
+        return;
+    }
+    let frames = samples.len() / channels;
+    let fade_frames = ((u64::from(sample_rate) + 2) / 4).max(1) as usize;
+    for (frame, values) in samples.chunks_exact_mut(channels).enumerate() {
+        let distance = frame.min(frames - 1 - frame).min(fade_frames);
+        let gain = distance as f64 / fade_frames as f64;
+        for sample in values {
+            *sample = (f64::from(*sample) * gain).round() as i16;
+        }
+    }
+}
+
+/// Remove DC and subsonic capture drift independently in each channel.
+/// Initialize from the first frame to avoid creating a filter startup impulse.
+fn high_pass_recording(samples: &mut [i16], sample_rate: u32, channels: u16) {
+    let channels = usize::from(channels);
+    if channels == 0 || sample_rate == 0 || samples.len() < channels {
+        return;
+    }
+    let alpha = (-std::f64::consts::TAU * 10.0 / f64::from(sample_rate)).exp();
+    let mut previous_input: Vec<f64> = samples[..channels].iter().map(|&s| f64::from(s)).collect();
+    let mut previous_output = vec![0.0; channels];
+    for frame in samples.chunks_exact_mut(channels) {
+        for (channel, sample) in frame.iter_mut().enumerate() {
+            let input = f64::from(*sample);
+            let output = alpha * (previous_output[channel] + input - previous_input[channel]);
+            previous_input[channel] = input;
+            previous_output[channel] = output;
+            *sample = output
+                .round()
+                .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
+        }
+    }
+}
+
+fn encode_recording(samples: &mut [i16], spec: hound::WavSpec) -> Result<String, String> {
+    high_pass_recording(samples, spec.sample_rate, spec.channels);
+    fade_recording(samples, spec.sample_rate, spec.channels);
+    let mut output = Cursor::new(Vec::new());
+    {
+        let mut writer = hound::WavWriter::new(&mut output, spec).map_err(|e| e.to_string())?;
+        for &sample in samples.iter() {
+            writer.write_sample(sample).map_err(|e| e.to_string())?;
+        }
+        writer.finalize().map_err(|e| e.to_string())?;
+    }
+    Ok(STANDARD.encode(output.into_inner()))
+}
+
+fn import_wav(bytes: Vec<u8>) -> Result<String, String> {
+    let mut reader =
+        hound::WavReader::new(Cursor::new(&bytes)).map_err(|e| format!("Invalid WAV: {e}"))?;
+    let spec = reader.spec();
+    if spec.channels == 0 || spec.sample_rate == 0 {
+        return Err("Invalid WAV format".into());
+    }
+    if spec.sample_format == hound::SampleFormat::Float {
+        for sample in reader.samples::<f32>() {
+            sample.map_err(|e| e.to_string())?;
+        }
+    } else {
+        for sample in reader.samples::<i32>() {
+            sample.map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(STANDARD.encode(bytes))
 }
 
 fn time_label(seconds: f64) -> String {
@@ -111,6 +185,10 @@ impl CaptureSnapshot {
 }
 
 impl Editor {
+    pub(crate) fn is_recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(target: (usize, usize), original: crate::Entry) -> Self {
         let duration = original
@@ -360,20 +438,11 @@ impl Editor {
         if let Some(error) = recording.error.lock().map_err(|e| e.to_string())?.take() {
             return Err(error);
         }
-        let samples = recording.samples.lock().map_err(|e| e.to_string())?;
+        let mut samples = recording.samples.lock().map_err(|e| e.to_string())?;
         if samples.is_empty() {
             return Err("No audio was recorded.".into());
         }
-        let mut output = Cursor::new(Vec::new());
-        {
-            let mut writer =
-                hound::WavWriter::new(&mut output, recording.spec).map_err(|e| e.to_string())?;
-            for &sample in samples.iter() {
-                writer.write_sample(sample).map_err(|e| e.to_string())?;
-            }
-            writer.finalize().map_err(|e| e.to_string())?;
-        }
-        self.clip = Some(STANDARD.encode(output.into_inner()));
+        self.clip = Some(encode_recording(&mut samples, recording.spec)?);
         self.duration = samples.len() as f64
             / recording.spec.channels as f64
             / recording.spec.sample_rate as f64;
@@ -605,25 +674,7 @@ impl Editor {
                                         }
                                         std::fs::read(&path).map_err(|e| e.to_string())
                                     })
-                                    .and_then(|bytes| {
-                                        let mut reader = hound::WavReader::new(Cursor::new(&bytes))
-                                            .map_err(|e| format!("Invalid WAV: {e}"))?;
-                                        let spec = reader.spec();
-                                        if spec.channels == 0 || spec.sample_rate == 0 {
-                                            return Err("Invalid WAV format".into());
-                                        }
-                                        // Decode all samples to reject truncated or corrupt files.
-                                        if spec.sample_format == hound::SampleFormat::Float {
-                                            for sample in reader.samples::<f32>() {
-                                                sample.map_err(|e| e.to_string())?;
-                                            }
-                                        } else {
-                                            for sample in reader.samples::<i32>() {
-                                                sample.map_err(|e| e.to_string())?;
-                                            }
-                                        }
-                                        Ok(STANDARD.encode(bytes))
-                                    }) {
+                                    .and_then(import_wav) {
                                     Ok(clip) => {
                                         self.playback = None;
                                         self.clip = Some(clip);
@@ -816,6 +867,115 @@ fn show_entry_context(ui: &mut egui::Ui, entry: &crate::Entry, l1_name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recordings_are_faded_per_frame_and_imports_are_unchanged() {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 8,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let original: Vec<i16> = (0..8).flat_map(|_| [12000, -12000]).collect();
+        let mut input = Cursor::new(Vec::new());
+        {
+            let mut writer = hound::WavWriter::new(&mut input, spec).unwrap();
+            for &sample in &original {
+                writer.write_sample(sample).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        let imported_bytes = input.into_inner();
+        assert_eq!(
+            STANDARD
+                .decode(import_wav(imported_bytes.clone()).unwrap())
+                .unwrap(),
+            imported_bytes
+        );
+
+        let mut expected = original.clone();
+        high_pass_recording(&mut expected, spec.sample_rate, spec.channels);
+        fade_recording(&mut expected, spec.sample_rate, spec.channels);
+        let encoded = encode_recording(&mut original.clone(), spec).unwrap();
+        let data = STANDARD.decode(encoded).unwrap();
+        let reader = hound::WavReader::new(Cursor::new(data)).unwrap();
+        let samples = reader
+            .into_samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(samples, expected);
+    }
+
+    #[test]
+    fn high_pass_removes_dc_and_preserves_speech_frequencies_per_channel() {
+        let rate = 48_000;
+        let mut samples: Vec<i16> = (0..rate)
+            .flat_map(|frame| {
+                let speech = (f64::from(frame) * std::f64::consts::TAU * 1000.0 / f64::from(rate))
+                    .sin()
+                    * 8000.0;
+                [(12000.0 + speech) as i16, -15000]
+            })
+            .collect();
+        high_pass_recording(&mut samples, rate, 2);
+        let left: Vec<f64> = samples[rate as usize..]
+            .chunks_exact(2)
+            .map(|frame| f64::from(frame[0]))
+            .collect();
+        let right = samples[rate as usize..]
+            .chunks_exact(2)
+            .map(|frame| frame[1]);
+        assert!(left.iter().sum::<f64>().abs() / (left.len() as f64) < 2.0);
+        assert!(left.iter().map(|v| v.abs()).fold(0.0, f64::max) > 7900.0);
+        assert!(right.into_iter().all(|sample| sample == 0));
+    }
+
+    #[test]
+    fn high_pass_attenuates_subsonic_drift_and_preserves_length() {
+        let rate = 1000;
+        let mut samples: Vec<i16> = (0..rate * 3)
+            .map(|frame| {
+                (10000.0 * (f64::from(frame) * std::f64::consts::TAU / f64::from(rate)).sin())
+                    as i16
+            })
+            .collect();
+        let len = samples.len();
+        high_pass_recording(&mut samples, rate, 1);
+        assert_eq!(samples.len(), len);
+        assert!(
+            samples[rate as usize..]
+                .iter()
+                .map(|&s| i32::from(s).abs())
+                .max()
+                .unwrap()
+                < 1100
+        );
+        high_pass_recording(&mut [], rate, 1);
+        high_pass_recording(&mut [1], 0, 1);
+    }
+
+    #[test]
+    fn short_recordings_have_overlapping_fades() {
+        let mut mono = [10000, 10000, 10000];
+        fade_recording(&mut mono, 8, 1);
+        assert_eq!(mono, [0, 5000, 0]);
+        let mut one_frame = [-32768, 32767];
+        fade_recording(&mut one_frame, 48000, 2);
+        assert_eq!(one_frame, [0, 0]);
+        fade_recording(&mut [], 48000, 2);
+    }
+
+    #[test]
+    fn fade_reaches_full_volume_after_quarter_second() {
+        let mut samples = vec![12000; 48000];
+        fade_recording(&mut samples, 48000, 1);
+        assert_eq!(samples[0], 0);
+        assert_eq!(samples[6000], 6000);
+        assert_eq!(samples[12000], 12000);
+        assert_eq!(samples[35999], 12000);
+        assert_eq!(samples[41999], 6000);
+        assert_eq!(samples[47999], 0);
+    }
 
     #[test]
     fn recorder_shortcuts_seek_and_dispatch_project_actions() {

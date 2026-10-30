@@ -16,7 +16,9 @@ pub enum Action {
     SaveProject,
     SaveProjectAs,
     EditEntry,
+    DuplicateEntry,
     StopEditing,
+    DeselectEntries,
     SelectPrevious,
     SelectNext,
     AddTeacherL1,
@@ -83,7 +85,9 @@ impl Action {
             Self::SaveProject => "save_project",
             Self::SaveProjectAs => "save_project_as",
             Self::EditEntry => "edit_entry",
+            Self::DuplicateEntry => "duplicate_entry",
             Self::StopEditing => "stop_editing",
+            Self::DeselectEntries => "deselect_entries",
             Self::SelectPrevious => "select_previous",
             Self::SelectNext => "select_next",
             Self::AddTeacherL1 => "add_teacher_l1",
@@ -129,6 +133,12 @@ impl Action {
     }
 
     fn overlaps(self, other: Self) -> bool {
+        if matches!(
+            (self, other),
+            (Self::StopEditing, Self::DeselectEntries) | (Self::DeselectEntries, Self::StopEditing)
+        ) {
+            return false;
+        }
         self.shared() || other.shared() || self.recorder_only() == other.recorder_only()
     }
 }
@@ -199,8 +209,18 @@ impl Default for Registry {
                     shortcut: KeyboardShortcut::new(Modifiers::COMMAND, Key::E),
                 },
                 Binding {
+                    action: Action::DuplicateEntry,
+                    label: "Duplicate selected entries",
+                    shortcut: KeyboardShortcut::new(Modifiers::COMMAND, Key::D),
+                },
+                Binding {
                     action: Action::StopEditing,
                     label: "Stop editing entry",
+                    shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::Escape),
+                },
+                Binding {
+                    action: Action::DeselectEntries,
+                    label: "Deselect entries",
                     shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::Escape),
                 },
                 Binding {
@@ -346,6 +366,33 @@ impl Registry {
                     binding.shortcut = shortcut;
                 }
             }
+            // A newly introduced default must not invalidate an older custom binding.
+            if !settings.bindings.contains_key(Action::DuplicateEntry.id()) {
+                let index = registry
+                    .bindings
+                    .iter()
+                    .position(|b| b.action == Action::DuplicateEntry)
+                    .unwrap();
+                let conflicts = |shortcut| {
+                    registry.bindings.iter().enumerate().any(|(other, b)| {
+                        other != index
+                            && b.action.overlaps(Action::DuplicateEntry)
+                            && Self::same_shortcut(b.shortcut, shortcut)
+                    })
+                };
+                if conflicts(registry.bindings[index].shortcut) {
+                    let fallback = [
+                        Modifiers::COMMAND | Modifiers::SHIFT,
+                        Modifiers::COMMAND | Modifiers::ALT,
+                        Modifiers::COMMAND | Modifiers::ALT | Modifiers::SHIFT,
+                    ]
+                    .into_iter()
+                    .map(|modifiers| KeyboardShortcut::new(modifiers, Key::D))
+                    .find(|&shortcut| !conflicts(shortcut))
+                    .ok_or("No available default shortcut for duplicate entries.")?;
+                    registry.bindings[index].shortcut = fallback;
+                }
+            }
             for (index, binding) in registry.bindings.iter().enumerate() {
                 if registry.bindings[..index].iter().any(|other| {
                     other.action.overlaps(binding.action)
@@ -421,7 +468,7 @@ impl Registry {
             || shortcut.modifiers.command
             || shortcut.modifiers.ctrl
             || shortcut.modifiers.mac_cmd
-            || (action == Action::StopEditing
+            || (matches!(action, Action::StopEditing | Action::DeselectEntries)
                 && shortcut.logical_key == Key::Escape
                 && shortcut.modifiers == Modifiers::NONE)
     }
@@ -434,7 +481,9 @@ impl Registry {
     /// Consume only exact matches, so Ctrl+Shift+Z cannot also invoke Ctrl+Z.
     pub fn take_actions(&self, input: &mut InputState, editing_entry: bool) -> Vec<Action> {
         self.take_filtered_actions(input, |action| {
-            !action.recorder_only() && (action != Action::StopEditing || editing_entry)
+            !action.recorder_only()
+                && (action != Action::StopEditing || editing_entry)
+                && (action != Action::DeselectEntries || !editing_entry)
         })
     }
 
@@ -613,8 +662,6 @@ impl Editor {
 
                                 for (index, binding) in registry.bindings.iter().enumerate() {
                                     if binding.action == Action::RecorderPlayPause {
-                                        ui.add_space(8.0);
-                                        ui.end_row();
                                         ui.strong("Recorder");
                                         ui.label("");
                                         ui.end_row();
@@ -679,6 +726,49 @@ mod tests {
             .iter()
             .position(|binding| binding.action == action)
             .unwrap()
+    }
+
+    #[test]
+    fn keybind_editor_renders_without_grid_layout_panic() {
+        let ctx = egui::Context::default();
+        let mut editor = Editor {
+            open: true,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            editor.show(ui.ctx(), &mut registry);
+        });
+        output.textures_delta.clear();
+        assert!(editor.open);
+    }
+
+    #[test]
+    fn deselect_binding_is_contextual_and_configurable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("keybinds.toml");
+        let mut registry = Registry::load_from(&path);
+        let index = index(&registry, Action::DeselectEntries);
+        let shortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::B);
+        registry.set(index, shortcut).unwrap();
+        registry.persist();
+        let registry = Registry::load_from(&path);
+        assert_eq!(registry.bindings[index].shortcut, shortcut);
+        let event = || Event::Key {
+            key: Key::B,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        };
+        let mut input = InputState::default();
+        input.events.push(event());
+        assert!(registry.take_actions(&mut input, true).is_empty());
+        assert_eq!(
+            registry.take_actions(&mut input, false),
+            vec![Action::DeselectEntries]
+        );
+        assert!(input.events.is_empty());
     }
 
     #[test]
@@ -772,6 +862,40 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_shortcut_is_configurable_and_preserves_older_bindings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("keybinds.toml");
+        let settings = Settings {
+            version: 1,
+            bindings: BTreeMap::from([(
+                "undo".into(),
+                StoredShortcut::from_shortcut(KeyboardShortcut::new(Modifiers::COMMAND, Key::D)),
+            )]),
+        };
+        std::fs::write(&path, toml::to_string(&settings).unwrap()).unwrap();
+        let mut registry = Registry::load_from(&path);
+        assert!(registry.storage_error.is_none());
+        assert_eq!(
+            registry.bindings[index(&registry, Action::Undo)].shortcut,
+            KeyboardShortcut::new(Modifiers::COMMAND, Key::D)
+        );
+        let duplicate = index(&registry, Action::DuplicateEntry);
+        assert_eq!(
+            registry.bindings[duplicate].shortcut,
+            KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::D)
+        );
+        registry
+            .set(duplicate, KeyboardShortcut::new(Modifiers::COMMAND, Key::B))
+            .unwrap();
+        registry.persist();
+        let loaded = Registry::load_from(&path);
+        assert_eq!(
+            loaded.bindings[index(&loaded, Action::DuplicateEntry)].shortcut,
+            KeyboardShortcut::new(Modifiers::COMMAND, Key::B)
+        );
+    }
+
+    #[test]
     fn invalid_settings_are_reported_and_not_overwritten() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("keybinds.toml");
@@ -851,6 +975,7 @@ mod tests {
                 Action::SaveProjectAs,
             ),
             (Key::R, Modifiers::COMMAND, Action::SwitchLanguage),
+            (Key::D, Modifiers::COMMAND, Action::DuplicateEntry),
             (Key::ArrowRight, Modifiers::COMMAND, Action::MoveToStudent),
             (Key::ArrowLeft, Modifiers::COMMAND, Action::MoveToTeacher),
             (
@@ -878,8 +1003,11 @@ mod tests {
         assert!(input.events.is_empty());
 
         input.events.push(event(Key::Escape, Modifiers::NONE));
-        assert!(registry.take_actions(&mut input, false).is_empty());
-        assert_eq!(input.events.len(), 1);
+        assert_eq!(
+            registry.take_actions(&mut input, false),
+            vec![Action::DeselectEntries]
+        );
+        input.events.push(event(Key::Escape, Modifiers::NONE));
         assert_eq!(
             registry.take_actions(&mut input, true),
             vec![Action::StopEditing]

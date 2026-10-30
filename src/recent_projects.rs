@@ -135,9 +135,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("recent.toml");
         let mut recent = RecentProjects::load_from(&path);
-        recent.record(Path::new("/one.toml"), "One");
-        recent.record(Path::new("/two.toml"), "Two");
-        recent.record(Path::new("/one.toml"), "Renamed");
+        recent.record(Path::new("/one.loqr"), "One");
+        recent.record(Path::new("/two.loqr"), "Two");
+        recent.record(Path::new("/one.loqr"), "Renamed");
         let mut loaded = RecentProjects::load_from(&path);
         assert_eq!(
             loaded
@@ -147,7 +147,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["Renamed", "Two"]
         );
-        loaded.forget(Path::new("/one.toml"));
+        loaded.forget(Path::new("/one.loqr"));
         assert_eq!(RecentProjects::load_from(&path).projects.len(), 1);
     }
 
@@ -159,7 +159,7 @@ mod tests {
         std::fs::write(&path, contents).unwrap();
         let mut recent = RecentProjects::load_from(&path);
         assert!(recent.storage_error.is_some());
-        recent.record(Path::new("/new.toml"), "New");
+        recent.record(Path::new("/new.loqr"), "New");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
     }
 
@@ -168,7 +168,7 @@ mod tests {
         let mut recent = RecentProjects::default();
         for index in 0..20 {
             recent.record(
-                Path::new(&format!("/{index}.toml")),
+                Path::new(&format!("/{index}.loqr")),
                 &format!("Project {index}"),
             );
         }

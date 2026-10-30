@@ -13,6 +13,7 @@ eframe = { version = "0.37.0", features = ["default"] }
 hound = "3"
 printpdf = { version = "0.12.8", default-features = false }
 rfd = "0.17.2"
+rkyv = { version = "=0.8.18", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32"] }
 rodio = { version = "0.23", default-features = false, features = ["playback", "hound"] }
 serde = { version = "1.0.229", features = ["derive"] }
 tempfile = "3.27.0"

@@ -21,8 +21,7 @@ const DEFAULT_FONT_SIZE: f32 = 15.0;
 const MIN_FONT_SIZE: f32 = 8.0;
 const MAX_FONT_SIZE: f32 = 30.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Paper {
     #[default]
     A4,
@@ -50,12 +49,10 @@ impl Paper {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub paper: Paper,
     pub font_size: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<PathBuf>,
 }
 
@@ -95,10 +92,28 @@ impl Settings {
     }
 }
 
-#[derive(Default)]
 pub struct Window {
     pub open: bool,
     error: Option<String>,
+    wav: bool,
+    lesson: Option<usize>,
+    teacher: bool,
+    student: bool,
+    wav_folder: Option<String>,
+}
+
+impl Default for Window {
+    fn default() -> Self {
+        Self {
+            open: false,
+            error: None,
+            wav: false,
+            lesson: None,
+            teacher: true,
+            student: true,
+            wav_folder: None,
+        }
+    }
 }
 
 impl Window {
@@ -112,16 +127,19 @@ impl Window {
         keybinds: &crate::keybinds::Registry,
         directory: Option<&Path>,
         project_path: Option<&Path>,
+        audio_gaps: crate::project::AudioGaps,
+        recording: bool,
     ) -> Vec<crate::keybinds::Action> {
         let mut actions = Vec::new();
         if !self.open {
+            self.wav_folder = None;
             return actions;
         }
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("export-pdf"),
             egui::ViewportBuilder::default()
-                .with_title("Export transcript")
-                .with_inner_size([440.0, 310.0])
+                .with_title("Export")
+                .with_inner_size([440.0, 400.0])
                 .with_min_inner_size([340.0, 260.0]),
             |ui, _| {
                 if ui.input(|input| input.viewport().close_requested()) {
@@ -140,30 +158,78 @@ impl Window {
                     return;
                 }
                 egui::Frame::new().inner_margin(16.0).show(ui, |ui| {
-                    ui.heading("Export transcript");
+                    ui.heading("Export");
                     ui.add_space(12.0);
-                    ui.label("Format: PDF");
-                    ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        ui.label("Paper size");
-                        egui::ComboBox::from_id_salt("pdf_paper")
-                            .selected_text(settings.paper.label())
+                        ui.label("Format:");
+                        ui.selectable_value(&mut self.wav, false, "PDF");
+                        ui.selectable_value(&mut self.wav, true, "WAV");
+                    });
+                    ui.add_space(8.0);
+                    if self.wav {
+                        let folder = self
+                            .wav_folder
+                            .get_or_insert_with(|| crate::export_wav::folder_name(name));
+                        ui.horizontal(|ui| {
+                            ui.label("New folder name:");
+                            ui.text_edit_singleline(folder);
+                        });
+                        if self.lesson.is_some_and(|index| index >= lessons.len()) {
+                            self.lesson = None;
+                        }
+                        egui::ComboBox::from_id_salt("wav_scope")
+                            .selected_text(
+                                self.lesson
+                                    .and_then(|i| lessons.get(i))
+                                    .map(|l| l.name.as_str())
+                                    .unwrap_or("Entire project"),
+                            )
                             .show_ui(ui, |ui| {
-                                for paper in [Paper::A4, Paper::Letter, Paper::Legal, Paper::A3] {
-                                    ui.selectable_value(&mut settings.paper, paper, paper.label());
+                                ui.selectable_value(&mut self.lesson, None, "Entire project");
+                                for (index, lesson) in lessons.iter().enumerate() {
+                                    ui.selectable_value(
+                                        &mut self.lesson,
+                                        Some(index),
+                                        &lesson.name,
+                                    );
                                 }
                             });
-                    });
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Font size");
-                        ui.add(
-                            egui::DragValue::new(&mut settings.font_size)
-                                .range(MIN_FONT_SIZE..=MAX_FONT_SIZE)
-                                .speed(0.5)
-                                .suffix(" pt"),
-                        );
-                    });
+                        ui.checkbox(&mut self.teacher, "Include teacher audio");
+                        ui.checkbox(&mut self.student, "Include student audio");
+                        ui.label("Excluded audio is replaced with silence.");
+                        let selected = self.lesson.map(|i| &lessons[i..i + 1]).unwrap_or(lessons);
+                        if recording {
+                            ui.label("Stop recording before exporting audio.");
+                        } else if !crate::export_wav::complete(selected) {
+                            ui.label("All selected lessons must be fully recorded.");
+                        }
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label("Paper size");
+                            egui::ComboBox::from_id_salt("pdf_paper")
+                                .selected_text(settings.paper.label())
+                                .show_ui(ui, |ui| {
+                                    for paper in [Paper::A4, Paper::Letter, Paper::Legal, Paper::A3]
+                                    {
+                                        ui.selectable_value(
+                                            &mut settings.paper,
+                                            paper,
+                                            paper.label(),
+                                        );
+                                    }
+                                });
+                        });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Font size");
+                            ui.add(
+                                egui::DragValue::new(&mut settings.font_size)
+                                    .range(MIN_FONT_SIZE..=MAX_FONT_SIZE)
+                                    .speed(0.5)
+                                    .suffix(" pt"),
+                            );
+                        });
+                    }
                     ui.add_space(12.0);
                     if let Some(error) = &self.error {
                         ui.colored_label(egui::Color32::LIGHT_RED, error);
@@ -178,19 +244,67 @@ impl Window {
                     });
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Export…").clicked() {
+                        let selected = self
+                            .lesson
+                            .and_then(|i| lessons.get(i..i + 1))
+                            .unwrap_or(lessons);
+                        let can_export =
+                            !self.wav || (!recording && crate::export_wav::complete(selected));
+                        if ui
+                            .add_enabled(can_export, egui::Button::new("Export…"))
+                            .clicked()
+                        {
+                            if self.wav {
+                                let folder = self.wav_folder.as_deref().unwrap_or("");
+                                if folder.is_empty()
+                                    || folder == "."
+                                    || folder == ".."
+                                    || folder
+                                        .chars()
+                                        .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c))
+                                    || folder.ends_with([' ', '.'])
+                                {
+                                    self.error = Some("Enter a valid folder name.".into());
+                                    return;
+                                }
+                                let mut dialog = rfd::FileDialog::new()
+                                    .set_title("Choose where to create the export folder");
+                                if let Some(directory) = settings.initial_directory(directory) {
+                                    dialog = dialog.set_directory(directory);
+                                }
+                                if let Some(parent) = dialog.pick_folder() {
+                                    let destination = parent.join(folder);
+                                    match crate::export_wav::save_lessons(
+                                        &destination,
+                                        name,
+                                        selected,
+                                        self.teacher,
+                                        self.student,
+                                        audio_gaps,
+                                    ) {
+                                        Ok(()) => {
+                                            settings.record_export(&destination);
+                                            self.error = None;
+                                            self.open = false;
+                                        }
+                                        Err(error) => self.error = Some(error),
+                                    }
+                                }
+                                return;
+                            }
                             let mut filename =
                                 std::path::PathBuf::from(crate::project::suggested_file_name(name));
-                            filename.set_extension("pdf");
+                            let extension = "pdf";
+                            filename.set_extension(extension);
                             let mut dialog = rfd::FileDialog::new()
-                                .add_filter("PDF document", &["pdf"])
+                                .add_filter("PDF document", &[extension])
                                 .set_file_name(filename.to_string_lossy());
                             if let Some(directory) = settings.initial_directory(directory) {
                                 dialog = dialog.set_directory(directory);
                             }
                             if let Some(mut path) = dialog.save_file() {
                                 if path.extension().is_none() {
-                                    path.set_extension("pdf");
+                                    path.set_extension(extension);
                                     if path.exists()
                                         && rfd::MessageDialog::new()
                                             .set_title("Replace existing file?")
@@ -219,14 +333,15 @@ impl Window {
                                     );
                                     return;
                                 }
-                                match save(
+                                let result = save(
                                     &path,
                                     name,
                                     l1,
                                     lessons,
                                     settings.paper,
                                     settings.font_size,
-                                ) {
+                                );
+                                match result {
                                     Ok(()) => {
                                         settings.record_export(&path);
                                         self.error = None;
@@ -689,6 +804,8 @@ mod tests {
                 &crate::keybinds::Registry::default(),
                 None,
                 None,
+                crate::project::AudioGaps::default(),
+                false,
             );
         });
         output.textures_delta.clear();

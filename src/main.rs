@@ -3,7 +3,9 @@
 mod audio;
 mod audio_devices;
 mod export_pdf;
+mod export_wav;
 mod keybinds;
+mod lesson_player;
 mod macronize;
 mod parsing_review;
 mod project;
@@ -16,6 +18,8 @@ const L1_COLOR: Color32 = Color32::from_rgb(24, 68, 80);
 const LATIN_COLOR: Color32 = Color32::from_rgb(80, 0, 0);
 const L1_ACCENT: Color32 = Color32::from_rgb(60, 184, 213);
 const LATIN_ACCENT: Color32 = Color32::from_rgb(224, 70, 70);
+const AUDIO_MARKER_COLOR: Color32 = Color32::from_rgb(189, 219, 63);
+const AUDIO_MARKER_INSET: f32 = 8.0;
 const LATIN_FONT: &str = "source-serif-4";
 
 fn configure_fonts(ctx: &egui::Context) {
@@ -73,36 +77,63 @@ fn main() -> eframe::Result {
     )
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Participant {
     Teacher,
     Student,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Language {
     L1,
     Latin,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Entry {
     participant: Participant,
     language: Language,
     text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     audio: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Lesson {
     name: String,
     entries: Vec<Entry>,
     expanded: bool,
+}
+
+fn lesson_recording_summary(lesson: &Lesson, gaps: project::AudioGaps) -> String {
+    if lesson.entries.is_empty() {
+        return "Recordings incomplete".into();
+    }
+    let duration = lesson.entries.iter().try_fold(0.0, |sum, entry| {
+        let clip = entry.audio.as_deref()?;
+        Some(sum + audio::clip_duration(clip).ok()?)
+    });
+    let Some(duration) = duration else {
+        return "Recordings incomplete".into();
+    };
+    let total = duration
+        + lesson
+            .entries
+            .windows(2)
+            .map(|pair| f64::from(gaps.between(pair[0].participant, pair[1].participant)) / 1000.0)
+            .sum::<f64>();
+    let tenths = (total * 10.0).round() as u64;
+    let seconds = tenths / 10;
+    if seconds >= 3600 {
+        format!(
+            "{}:{:02}:{:02}.{}",
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60,
+            tenths % 10
+        )
+    } else {
+        format!("{:02}:{:02}.{}", seconds / 60, seconds % 60, tenths % 10)
+    }
 }
 
 #[derive(Clone)]
@@ -115,6 +146,10 @@ enum TextTarget {
 
 #[derive(Clone)]
 enum Command {
+    SetAudioGaps {
+        before: project::AudioGaps,
+        after: project::AudioGaps,
+    },
     SetExportSettings {
         before: export_pdf::Settings,
         after: export_pdf::Settings,
@@ -166,6 +201,7 @@ enum Command {
 
 #[derive(Clone, Copy)]
 enum EntryAction {
+    Duplicate,
     Delete,
     MoveParticipant,
     SwitchLanguage,
@@ -176,6 +212,7 @@ enum EntryAction {
 
 #[derive(Clone, Copy)]
 enum BulkAction {
+    Duplicate,
     Delete,
     ToTeacher,
     ToStudent,
@@ -203,8 +240,11 @@ enum FileAction {
 
 struct App {
     audio_editor: Option<audio::Editor>,
+    lesson_playback: Option<lesson_player::Player>,
+    playback_error: Option<String>,
     export_window: export_pdf::Window,
     export_settings: export_pdf::Settings,
+    audio_gaps: project::AudioGaps,
     project_open: bool,
     recent_projects: recent_projects::RecentProjects,
     project_name: String,
@@ -212,6 +252,7 @@ struct App {
     saved_project: project::Project,
     l1_name: String,
     lessons: Vec<Lesson>,
+    lesson_recording_summaries: Option<Vec<String>>,
     active_lesson: usize,
     scroll_to_lesson: Option<usize>,
     scrollbar_offset: Option<f32>,
@@ -237,8 +278,11 @@ impl Default for App {
         let saved_project = project::Project::new(String::new(), String::new(), lessons.clone());
         Self {
             audio_editor: None,
+            lesson_playback: None,
+            playback_error: None,
             export_window: export_pdf::Window::default(),
             export_settings: export_pdf::Settings::default(),
+            audio_gaps: project::AudioGaps::default(),
             project_open: false,
             recent_projects: recent_projects::RecentProjects::default(),
             project_name: String::new(),
@@ -246,6 +290,7 @@ impl Default for App {
             saved_project,
             l1_name: String::new(),
             lessons,
+            lesson_recording_summaries: None,
             active_lesson: 0,
             scroll_to_lesson: None,
             scrollbar_offset: None,
@@ -268,6 +313,76 @@ impl Default for App {
 }
 
 impl App {
+    fn deselect_entries(&mut self) {
+        self.set_selection(Vec::new(), None);
+        self.lesson_playback = None;
+    }
+
+    fn toggle_lesson_playback(&mut self, lesson: usize) {
+        if let Some(player) = &self.lesson_playback {
+            if player.lesson == lesson {
+                player.toggle();
+                return;
+            }
+        }
+        self.lesson_playback = None;
+        self.playback_error = None;
+        let start = self
+            .selected_entry
+            .filter(|(li, _)| *li == lesson)
+            .map(|(_, index)| index)
+            .unwrap_or(0);
+        match lesson_player::Player::start(lesson, &self.lessons[lesson], start, self.audio_gaps) {
+            Ok(player) => {
+                self.set_selection(vec![(lesson, start)], Some((lesson, start)));
+                self.active_lesson = lesson;
+                self.lessons[lesson].expanded = true;
+                self.scroll_to_entry = Some((lesson, start));
+                self.editing_entry = None;
+                self.lesson_playback = Some(player);
+            }
+            Err(error) => self.playback_error = Some(error),
+        }
+    }
+
+    fn update_lesson_playback(&mut self, ctx: &egui::Context) {
+        let Some(player) = &mut self.lesson_playback else {
+            return;
+        };
+        if self.selected_entry != Some((player.lesson, player.selected)) {
+            self.lesson_playback = None;
+            return;
+        }
+        let lesson = player.lesson;
+        let old = player.selected;
+        let (index, finished, error) = player.update();
+        if index != old {
+            self.set_selection(vec![(lesson, index)], Some((lesson, index)));
+            self.active_lesson = lesson;
+            self.scroll_to_entry = Some((lesson, index));
+            self.editing_entry = None;
+        }
+        if finished {
+            self.lesson_playback = None;
+            self.playback_error = error;
+        } else if self
+            .lesson_playback
+            .as_ref()
+            .is_some_and(|player| !player.is_paused())
+        {
+            ctx.request_repaint_after(std::time::Duration::from_millis(25));
+        }
+    }
+
+    fn recording_summaries(&mut self) -> &[String] {
+        self.lesson_recording_summaries.get_or_insert_with(|| {
+            self.lessons
+                .iter()
+                .map(|lesson| lesson_recording_summary(lesson, self.audio_gaps))
+                .collect()
+        })
+    }
+
     fn selection(&self) -> Vec<(usize, usize)> {
         let mut entries = self.extra_selected.clone();
         entries.extend(self.selected_entry);
@@ -383,6 +498,7 @@ impl App {
             self.lessons.clone(),
         );
         project.export_settings = self.export_settings.clone();
+        project.audio_gaps = self.audio_gaps;
         project
     }
 
@@ -405,16 +521,16 @@ impl App {
         let path = if !save_as && let Some(path) = &self.project_path {
             path.clone()
         } else {
-            let mut dialog = rfd::FileDialog::new().add_filter("TOML project", &["toml"]);
+            let mut dialog = rfd::FileDialog::new().add_filter("Loquaris project", &["loqr"]);
             if let Some(directory) = self.dialog_directory() {
                 dialog = dialog.set_directory(directory);
             }
             dialog = dialog.set_file_name(project::suggested_file_name(&self.project_name));
-            let Some(mut path) = dialog.save_file() else {
+            let Some(path) = dialog.save_file() else {
                 return false;
             };
-            if path.extension().is_none() {
-                path.set_extension("toml");
+            let (path, extension_added) = project::ensure_extension(&path);
+            if extension_added {
                 if path.exists()
                     && rfd::MessageDialog::new()
                         .set_title("Replace existing file?")
@@ -462,13 +578,17 @@ impl App {
     }
 
     fn replace_project(&mut self, project: project::Project, path: Option<std::path::PathBuf>) {
+        self.lesson_playback = None;
+        self.playback_error = None;
         self.audio_editor = None;
         self.export_window = export_pdf::Window::default();
         self.project_open = true;
         self.project_name = project.name.clone();
         self.l1_name = project.l1_name.clone();
         self.lessons = project.lessons.clone();
+        self.lesson_recording_summaries = None;
         self.export_settings = project.export_settings.clone();
+        self.audio_gaps = project.audio_gaps;
         self.saved_project = project;
         self.project_path = path;
         self.active_lesson = 0;
@@ -488,7 +608,7 @@ impl App {
     }
 
     fn open_project(&mut self, ctx: &egui::Context) {
-        let mut dialog = rfd::FileDialog::new().add_filter("TOML project", &["toml"]);
+        let mut dialog = rfd::FileDialog::new().add_filter("Loquaris projects", &["loqr"]);
         if let Some(directory) = self.dialog_directory() {
             dialog = dialog.set_directory(directory);
         }
@@ -557,14 +677,18 @@ impl App {
             return;
         }
         self.project_open = false;
+        self.lesson_playback = None;
+        self.playback_error = None;
         self.audio_editor = None;
         self.export_window = export_pdf::Window::default();
         self.export_settings = export_pdf::Settings::default();
+        self.audio_gaps = project::AudioGaps::default();
         self.project_name.clear();
         self.l1_name.clear();
         self.saved_project = project::Project::new(String::new(), String::new(), Vec::new());
         self.project_path = None;
         self.lessons.clear();
+        self.lesson_recording_summaries = None;
         self.active_lesson = 0;
         self.selected_entry = None;
         self.extra_selected.clear();
@@ -589,6 +713,8 @@ impl App {
     }
 
     fn add(&mut self, participant: Participant, language: Language) {
+        self.lesson_playback = None;
+        self.lesson_recording_summaries = None;
         let lesson_index = self
             .selected_entry
             .map_or(self.active_lesson, |(lesson, _)| lesson);
@@ -618,6 +744,8 @@ impl App {
     }
 
     fn new_lesson(&mut self) {
+        self.lesson_playback = None;
+        self.lesson_recording_summaries = None;
         let lesson = Lesson {
             name: String::new(),
             entries: Vec::new(),
@@ -647,10 +775,63 @@ impl App {
         self.history.push(command);
     }
 
+    fn duplicate_entries(&mut self, targets: &[(usize, usize)]) -> bool {
+        if targets.is_empty() {
+            return false;
+        }
+        let selected_before = self.selection();
+        let chosen: std::collections::BTreeSet<_> = targets.iter().copied().collect();
+        let before: Vec<Vec<Entry>> = self
+            .lessons
+            .iter()
+            .map(|lesson| lesson.entries.clone())
+            .collect();
+        let mut after = Vec::with_capacity(before.len());
+        let mut selected_after = Vec::new();
+        let mut primary_after = None;
+        for (lesson, entries) in before.iter().enumerate() {
+            let mut values = Vec::new();
+            for (index, entry) in entries.iter().enumerate() {
+                values.push(entry.clone());
+                if chosen.contains(&(lesson, index)) {
+                    let position = (lesson, values.len());
+                    values.push(entry.clone());
+                    selected_after.push(position);
+                    if self.selected_entry == Some((lesson, index)) {
+                        primary_after = Some(position);
+                    }
+                }
+            }
+            after.push(values);
+        }
+        if selected_after.is_empty() {
+            return false;
+        }
+        let command = Command::BulkEntries {
+            before,
+            after,
+            selected_before,
+            selected_after,
+            primary_before: self.selected_entry,
+            primary_after,
+        };
+        self.apply_command(command.clone(), true);
+        self.history.push(command);
+        if let Some((lesson, index)) = self.selected_entry {
+            self.active_lesson = lesson;
+            self.lessons[lesson].expanded = true;
+            self.scroll_to_entry = Some((lesson, index));
+        }
+        true
+    }
+
     fn bulk_action(&mut self, action: BulkAction) -> bool {
         let selected_before = self.selection();
         if selected_before.len() < 2 {
             return false;
+        }
+        if matches!(action, BulkAction::Duplicate) {
+            return self.duplicate_entries(&selected_before);
         }
         if matches!(action, BulkAction::MoveUp | BulkAction::MoveDown)
             && !self.selection_is_contiguous()
@@ -678,6 +859,7 @@ impl App {
         let first = selected_before[0];
         let last = *selected_before.last().unwrap();
         match action {
+            BulkAction::Duplicate => unreachable!(),
             BulkAction::Delete => {
                 for lesson in &mut tagged {
                     lesson.retain(|(original, _)| !chosen.contains(original));
@@ -809,6 +991,9 @@ impl App {
     }
 
     fn entry_action(&mut self, lesson: usize, index: usize, action: EntryAction) -> bool {
+        if matches!(action, EntryAction::Duplicate) {
+            return self.duplicate_entries(&[(lesson, index)]);
+        }
         if matches!(action, EntryAction::Delete) {
             self.delete_entry(lesson, index);
             return true;
@@ -887,7 +1072,7 @@ impl App {
                     to,
                 }
             }
-            EntryAction::Delete | EntryAction::AutoMacronize => {
+            EntryAction::Delete | EntryAction::AutoMacronize | EntryAction::Duplicate => {
                 unreachable!()
             }
         };
@@ -909,6 +1094,7 @@ impl App {
                 keybinds::Action::MoveToTeacher => BulkAction::ToTeacher,
                 keybinds::Action::MoveEntryUp => BulkAction::MoveUp,
                 keybinds::Action::MoveEntryDown => BulkAction::MoveDown,
+                keybinds::Action::DuplicateEntry => BulkAction::Duplicate,
                 _ => return false,
             };
             return self.bulk_action(bulk);
@@ -918,6 +1104,7 @@ impl App {
         };
         let participant = self.lessons[lesson].entries[index].participant;
         let action = match action {
+            keybinds::Action::DuplicateEntry => EntryAction::Duplicate,
             keybinds::Action::SwitchLanguage if participant == Participant::Teacher => {
                 EntryAction::SwitchLanguage
             }
@@ -1076,6 +1263,32 @@ impl App {
     fn apply_command(&mut self, command: Command, forward: bool) {
         if matches!(
             &command,
+            Command::SetAudio { .. }
+                | Command::SetAudioGaps { .. }
+                | Command::SetEntryKind { .. }
+                | Command::InsertLesson { .. }
+                | Command::InsertEntry { .. }
+                | Command::DeleteEntry { .. }
+                | Command::MoveEntry { .. }
+                | Command::BulkEntries { .. }
+        ) {
+            self.lesson_playback = None;
+        }
+        if matches!(
+            &command,
+            Command::SetAudio { .. }
+                | Command::SetAudioGaps { .. }
+                | Command::SetEntryKind { .. }
+                | Command::InsertLesson { .. }
+                | Command::InsertEntry { .. }
+                | Command::DeleteEntry { .. }
+                | Command::MoveEntry { .. }
+                | Command::BulkEntries { .. }
+        ) {
+            self.lesson_recording_summaries = None;
+        }
+        if matches!(
+            &command,
             Command::InsertLesson { .. }
                 | Command::InsertEntry { .. }
                 | Command::DeleteEntry { .. }
@@ -1088,6 +1301,9 @@ impl App {
             self.editing_entry = None;
         }
         match command {
+            Command::SetAudioGaps { before, after } => {
+                self.audio_gaps = if forward { after } else { before };
+            }
             Command::SetExportSettings { before, after } => {
                 self.export_settings = if forward { after } else { before };
             }
@@ -1424,7 +1640,7 @@ impl App {
             egui::ViewportId::from_hash_of("project-details"),
             egui::ViewportBuilder::default()
                 .with_title("Project details")
-                .with_inner_size([480.0, 220.0])
+                .with_inner_size([540.0, 300.0])
                 .with_min_inner_size([340.0, 170.0]),
             |ui, _class| {
                 if ui.input(|input| input.viewport().close_requested()) {
@@ -1437,56 +1653,101 @@ impl App {
                 egui::Frame::new().inner_margin(12.0).show(ui, |ui| {
                     ui.heading("Project details");
                     ui.add_space(12.0);
-                    let column_width = ((ui.available_width() - 16.0) / 2.0).max(120.0);
-                    egui::Grid::new("project_details_table")
-                        .num_columns(2)
-                        .spacing([16.0, 6.0])
-                        .striped(true)
-                        .show(ui, |ui| {
-                            ui.add_sized(
-                                [column_width, 24.0],
-                                egui::Label::new(RichText::new("Detail").strong()),
-                            );
-                            ui.add_sized(
-                                [column_width, 24.0],
-                                egui::Label::new(RichText::new("Value").strong()),
-                            );
-                            ui.end_row();
-
-                            ui.add_sized([column_width, 28.0], egui::Label::new("Project name"));
-                            let before = self.project_name.clone();
-                            let name = ui.add_sized(
-                                [column_width, 28.0],
-                                egui::TextEdit::singleline(&mut self.project_name),
-                            );
-                            if self.focus_project_name {
-                                name.request_focus();
-                                self.focus_project_name = false;
-                            }
-                            if name.changed() {
-                                self.record_text(
-                                    TextTarget::ProjectName,
-                                    before,
-                                    self.project_name.clone(),
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        let column_width = ((ui.available_width() - 16.0) / 2.0).max(120.0);
+                        egui::Grid::new("project_details_table")
+                            .num_columns(2)
+                            .spacing([16.0, 6.0])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.add_sized(
+                                    [column_width, 24.0],
+                                    egui::Label::new(RichText::new("Detail").strong()),
                                 );
-                                ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
-                            }
-                            ui.end_row();
+                                ui.add_sized(
+                                    [column_width, 24.0],
+                                    egui::Label::new(RichText::new("Value").strong()),
+                                );
+                                ui.end_row();
+                                let before = self.audio_gaps;
+                                for (label, milliseconds) in [
+                                    (
+                                        "Same participant gap",
+                                        &mut self.audio_gaps.same_participant_ms,
+                                    ),
+                                    (
+                                        "Different participant gap",
+                                        &mut self.audio_gaps.different_participant_ms,
+                                    ),
+                                ] {
+                                    ui.add_sized([column_width, 28.0], egui::Label::new(label));
+                                    let mut seconds = f64::from(*milliseconds) / 1000.0;
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut seconds)
+                                                .range(0.0..=60.0)
+                                                .speed(0.01)
+                                                .fixed_decimals(3)
+                                                .suffix(" s"),
+                                        )
+                                        .changed()
+                                    {
+                                        *milliseconds = (seconds * 1000.0).round() as u32;
+                                    }
+                                    ui.end_row();
+                                }
+                                if self.audio_gaps != before {
+                                    self.lesson_playback = None;
+                                    self.history.push(Command::SetAudioGaps {
+                                        before,
+                                        after: self.audio_gaps,
+                                    });
+                                    self.lesson_recording_summaries = None;
+                                    ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+                                }
 
-                            ui.add_sized([column_width, 28.0], egui::Label::new("L1 language"));
-                            let before = self.l1_name.clone();
-                            if ui
-                                .add_sized(
+                                ui.add_sized(
                                     [column_width, 28.0],
-                                    egui::TextEdit::singleline(&mut self.l1_name),
-                                )
-                                .changed()
-                            {
-                                self.record_text(TextTarget::L1Name, before, self.l1_name.clone());
-                                ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
-                            }
-                            ui.end_row();
-                        });
+                                    egui::Label::new("Project name"),
+                                );
+                                let before = self.project_name.clone();
+                                let name = ui.add_sized(
+                                    [column_width, 28.0],
+                                    egui::TextEdit::singleline(&mut self.project_name),
+                                );
+                                if self.focus_project_name {
+                                    name.request_focus();
+                                    self.focus_project_name = false;
+                                }
+                                if name.changed() {
+                                    self.record_text(
+                                        TextTarget::ProjectName,
+                                        before,
+                                        self.project_name.clone(),
+                                    );
+                                    ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+                                }
+                                ui.end_row();
+
+                                ui.add_sized([column_width, 28.0], egui::Label::new("L1 language"));
+                                let before = self.l1_name.clone();
+                                if ui
+                                    .add_sized(
+                                        [column_width, 28.0],
+                                        egui::TextEdit::singleline(&mut self.l1_name),
+                                    )
+                                    .changed()
+                                {
+                                    self.record_text(
+                                        TextTarget::L1Name,
+                                        before,
+                                        self.l1_name.clone(),
+                                    );
+                                    ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+                                }
+                                ui.end_row();
+                            });
+                    });
                 });
             },
         );
@@ -1526,6 +1787,9 @@ impl App {
                             }
                         });
                     }
+                    keybinds::Action::DeselectEntries => {
+                        self.deselect_entries();
+                    }
                     keybinds::Action::SelectPrevious | keybinds::Action::SelectNext => {
                         self.select_adjacent(action == keybinds::Action::SelectNext);
                         ui.ctx().memory_mut(|memory| {
@@ -1545,7 +1809,8 @@ impl App {
                     | keybinds::Action::MoveToStudent
                     | keybinds::Action::MoveToTeacher
                     | keybinds::Action::MoveEntryUp
-                    | keybinds::Action::MoveEntryDown => {
+                    | keybinds::Action::MoveEntryDown
+                    | keybinds::Action::DuplicateEntry => {
                         if self.selected_entry_shortcut(action) {
                             ui.ctx().memory_mut(|memory| {
                                 if let Some(id) = memory.focused() {
@@ -1576,6 +1841,7 @@ impl eframe::App for App {
             self.welcome(ui);
             return;
         }
+        self.update_lesson_playback(ui.ctx());
         let mut file_action = self.handle_shortcuts(ui);
         self.keybind_editor.show(ui.ctx(), &mut self.keybinds);
         ui.visuals_mut().override_text_color = Some(Color32::WHITE);
@@ -1583,12 +1849,14 @@ impl eframe::App for App {
         ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
         let width = ui.available_width();
         let half = width / 2.0;
+        let background_area = ui.max_rect();
+        let mut foreground_rects = Vec::new();
 
         egui::MenuBar::new().ui(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
             ui.spacing_mut().button_padding = Vec2::new(12.0, 6.0);
             ui.spacing_mut().interact_size.y = 32.0;
-            ui.menu_button("File", |ui| {
+            let file_menu = ui.menu_button("File", |ui| {
                 if ui.button("New project").clicked() {
                     ui.close();
                     file_action = Some(FileAction::New);
@@ -1614,7 +1882,8 @@ impl eframe::App for App {
                     file_action = Some(FileAction::Close);
                 }
             });
-            ui.menu_button("Edit", |ui| {
+            foreground_rects.push(file_menu.response.rect);
+            let edit_menu = ui.menu_button("Edit", |ui| {
                 if ui.button("Project details…").clicked() {
                     ui.close();
                     self.project_details_open = true;
@@ -1624,29 +1893,45 @@ impl eframe::App for App {
                     self.keybind_editor.open = true;
                 }
             });
+            foreground_rects.push(edit_menu.response.rect);
             if self.is_dirty() {
-                ui.label("  • Unsaved changes");
+                foreground_rects.push(ui.label("  • Unsaved changes").rect);
             }
             if self.keybinds.storage_error.is_some() {
-                ui.colored_label(Color32::LIGHT_RED, "  • Keybind settings error")
-                    .on_hover_text("Open Edit → Keybinds for details.");
+                foreground_rects.push(
+                    ui.colored_label(Color32::LIGHT_RED, "  • Keybind settings error")
+                        .on_hover_text("Open Edit → Keybinds for details.")
+                        .rect,
+                );
             }
             if let Some(error) = &self.recent_projects.storage_error {
-                ui.colored_label(Color32::LIGHT_RED, "Recent projects error")
-                    .on_hover_text(error);
+                foreground_rects.push(
+                    ui.colored_label(Color32::LIGHT_RED, "Recent projects error")
+                        .on_hover_text(error)
+                        .rect,
+                );
             }
         });
+        if let Some(error) = &self.playback_error {
+            foreground_rects.push(ui.colored_label(Color32::LIGHT_RED, error).rect);
+        }
         ui.allocate_ui_with_layout(
             Vec2::new(width, 26.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                if ui.button("+ New lesson").clicked() {
+                let button = ui.button("+ New lesson");
+                foreground_rects.push(button.rect);
+                if button.clicked() {
                     self.new_lesson();
                 }
-                if ui.button("Undo").clicked() {
+                let button = ui.button("Undo");
+                foreground_rects.push(button.rect);
+                if button.clicked() {
                     self.undo();
                 }
-                if ui.button("Redo").clicked() {
+                let button = ui.button("Redo");
+                foreground_rects.push(button.rect);
+                if button.clicked() {
                     self.redo();
                 }
             },
@@ -1657,22 +1942,26 @@ impl eframe::App for App {
                 Vec2::new(half, 32.0),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    ui.label(RichText::new("Teacher").size(30.0).strong());
+                    foreground_rects
+                        .push(ui.label(RichText::new("Teacher").size(30.0).strong()).rect);
                 },
             );
             ui.allocate_ui_with_layout(
                 Vec2::new(half, 32.0),
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
-                    ui.label(
-                        RichText::new("Student")
-                            .font(entry_font(Language::Latin, 30.0))
-                            .strong(),
+                    foreground_rects.push(
+                        ui.label(
+                            RichText::new("Student")
+                                .font(entry_font(Language::Latin, 30.0))
+                                .strong(),
+                        )
+                        .rect,
                     );
                 },
             );
         });
-        ui.separator();
+        foreground_rects.push(ui.separator().rect);
         ui.add_space(4.0);
 
         let footer_height = 75.0;
@@ -1702,8 +1991,10 @@ impl eframe::App for App {
         let mut pending_entry_action = None;
         let mut pending_edit = None;
         let mut pending_audio = None;
+        let mut pending_playback = None;
         let mut pending_selection = None;
         let lesson_count = self.lessons.len();
+        let summaries = self.recording_summaries().to_vec();
         let multiple_entries = self
             .lessons
             .iter()
@@ -1750,7 +2041,17 @@ impl eframe::App for App {
                         width,
                         self.focus_name == Some(lesson_index),
                         false,
+                        &summaries[lesson_index],
+                        self.lesson_playback
+                            .as_ref()
+                            .filter(|player| player.lesson == lesson_index)
+                            .map(|player| !player.is_paused()),
+                        self.audio_editor.is_none() && !lesson.entries.is_empty(),
                     );
+                    foreground_rects.push(header.response.rect.intersect(viewport));
+                    if header.play_clicked {
+                        pending_playback = Some(lesson_index);
+                    }
                     if lesson.name != before_name {
                         self.history.push(Command::EditText {
                             target: TextTarget::LessonName(lesson_index),
@@ -1789,7 +2090,12 @@ impl eframe::App for App {
                                                         if entry.participant == participant {
                                                             ui.add_space(3.0);
                                                             ui.horizontal(|ui| {
-                                                                ui.add_space(10.0);
+                                                                let (card_margin, card_width) =
+                                                                    entry_column_geometry(
+                                                                        column_width,
+                                                                        entry.participant,
+                                                                    );
+                                                                ui.add_space(card_margin);
                                                                 let focus = self.focus_entry
                                                                     == Some((
                                                                         lesson_index,
@@ -1800,7 +2106,7 @@ impl eframe::App for App {
                                                                     ui,
                                                                     entry,
                                                                     &self.l1_name,
-                                                                    (column_width - 20.0).max(20.0),
+                                                                    card_width,
                                                                     focus,
                                                                     self.selected_entry
                                                                         == Some((
@@ -1842,6 +2148,12 @@ impl eframe::App for App {
                                                                         has_teacher_l1,
                                                                         has_teacher_latin,
                                                                     },
+                                                                );
+                                                                foreground_rects.push(
+                                                                    response
+                                                                        .bounds
+                                                                        .expand(8.0)
+                                                                        .intersect(viewport),
                                                                 );
                                                                 if entry.text != before {
                                                                     self.history.push(
@@ -1932,7 +2244,9 @@ impl eframe::App for App {
                         if body.response.clicked() {
                             selected = Some(lesson_index);
                         }
-                        if lesson_footer(ui, lesson_index, &lesson.name, width).clicked() {
+                        let footer = lesson_footer(ui, lesson_index, &lesson.name, width);
+                        foreground_rects.push(footer.rect.intersect(viewport));
+                        if footer.clicked() {
                             lesson.expanded = false;
                             if self
                                 .editing_entry
@@ -1965,6 +2279,7 @@ impl eframe::App for App {
             selected = Some(lesson);
         }
         if let Some((lesson, index)) = pending_audio {
+            self.lesson_playback = None;
             self.audio_editor = Some(audio::Editor::new(
                 (lesson, index),
                 self.lessons[lesson].entries[index].clone(),
@@ -2008,13 +2323,31 @@ impl eframe::App for App {
             let (_, top, _) = lesson_bounds[index];
             if top < viewport.top() - 1.0 {
                 let rect = egui::Rect::from_min_size(viewport.min, Vec2::new(width, 32.0));
+                foreground_rects.push(rect);
                 let mut sticky_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                 {
                     let ui = &mut sticky_ui;
                     ui.push_id(("sticky", index), |ui| {
                         let before = self.lessons[index].name.clone();
-                        let header =
-                            lesson_header(ui, &mut self.lessons[index], index, width, false, true);
+                        let can_play =
+                            self.audio_editor.is_none() && !self.lessons[index].entries.is_empty();
+                        let header = lesson_header(
+                            ui,
+                            &mut self.lessons[index],
+                            index,
+                            width,
+                            false,
+                            true,
+                            &summaries[index],
+                            self.lesson_playback
+                                .as_ref()
+                                .filter(|player| player.lesson == index)
+                                .map(|player| !player.is_paused()),
+                            can_play,
+                        );
+                        if header.play_clicked {
+                            pending_playback = Some(index);
+                        }
                         if self.lessons[index].name != before {
                             self.record_text(
                                 TextTarget::LessonName(index),
@@ -2034,11 +2367,17 @@ impl eframe::App for App {
             }
         }
 
+        if let Some(index) = pending_playback {
+            self.toggle_lesson_playback(index);
+            ui.ctx().request_repaint();
+        }
+
         // A single scrollbar in the gutter controls the shared chronological timeline.
         let track = egui::Rect::from_center_size(
             egui::pos2(center, viewport.center().y),
             Vec2::new(14.0, height),
         );
+        foreground_rects.push(track);
         let content_height = output.content_size.y.max(height);
         let max_offset = (content_height - height).max(0.0);
         let handle_height = (height * height / content_height).clamp(24.0_f32.min(height), height);
@@ -2090,22 +2429,25 @@ impl eframe::App for App {
         let mut footer_ui = ui.new_child(egui::UiBuilder::new().max_rect(footer_rect));
         let ui = &mut footer_ui;
         ui.add_space(4.0);
-        ui.separator();
+        foreground_rects.push(ui.separator().rect);
         let target_lesson = self
             .selected_entry
             .map_or(self.active_lesson, |(lesson, _)| lesson);
         let active = &self.lessons[target_lesson];
-        ui.label(
-            RichText::new(format!(
-                "Adding to lesson {}: {}",
-                target_lesson + 1,
-                if active.name.is_empty() {
-                    "Untitled"
-                } else {
-                    &active.name
-                }
-            ))
-            .color(Color32::LIGHT_GRAY),
+        foreground_rects.push(
+            ui.label(
+                RichText::new(format!(
+                    "Adding to lesson {}: {}",
+                    target_lesson + 1,
+                    if active.name.is_empty() {
+                        "Untitled"
+                    } else {
+                        &active.name
+                    }
+                ))
+                .color(Color32::LIGHT_GRAY),
+            )
+            .rect,
         );
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -2114,29 +2456,25 @@ impl eframe::App for App {
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     ui.add_space(10.0);
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new(format!("+ {}", self.l1_name))
-                                    .color(L1_ACCENT)
-                                    .strong(),
-                            )
-                            .fill(L1_COLOR),
+                    let button = ui.add(
+                        egui::Button::new(
+                            RichText::new(format!("+ {}", self.l1_name))
+                                .color(L1_ACCENT)
+                                .strong(),
                         )
-                        .clicked()
-                    {
+                        .fill(L1_COLOR),
+                    );
+                    foreground_rects.push(button.rect);
+                    if button.clicked() {
                         self.add(Participant::Teacher, Language::L1);
                     }
                     ui.add_space(12.0);
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("+ Latin").color(LATIN_ACCENT).strong(),
-                            )
+                    let button = ui.add(
+                        egui::Button::new(RichText::new("+ Latin").color(LATIN_ACCENT).strong())
                             .fill(LATIN_COLOR),
-                        )
-                        .clicked()
-                    {
+                    );
+                    foreground_rects.push(button.rect);
+                    if button.clicked() {
                         self.add(Participant::Teacher, Language::Latin);
                     }
                 },
@@ -2146,20 +2484,22 @@ impl eframe::App for App {
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
                     ui.add_space(10.0);
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("+ Latin").color(LATIN_ACCENT).strong(),
-                            )
+                    let button = ui.add(
+                        egui::Button::new(RichText::new("+ Latin").color(LATIN_ACCENT).strong())
                             .fill(LATIN_COLOR),
-                        )
-                        .clicked()
-                    {
+                    );
+                    foreground_rects.push(button.rect);
+                    if button.clicked() {
                         self.add(Participant::Student, Language::Latin);
                     }
                 },
             );
         });
+        if background_double_clicked(ui.ctx(), ui.layer_id(), background_area, &foreground_rects) {
+            self.deselect_entries();
+            self.editing_entry = None;
+            self.focus_entry = None;
+        }
         if let Some(mut review) = self.parsing_review.take() {
             match review.show(ui.ctx()) {
                 Some(parsing_review::Outcome::Apply(after)) => self.apply_review(&review, after),
@@ -2229,6 +2569,10 @@ impl eframe::App for App {
             &self.keybinds,
             export_directory.as_deref(),
             self.project_path.as_deref(),
+            self.audio_gaps,
+            self.audio_editor
+                .as_ref()
+                .is_some_and(|editor| editor.is_recording()),
         );
         if self.export_settings != before_export {
             self.history.push(Command::SetExportSettings {
@@ -2267,9 +2611,64 @@ impl eframe::App for App {
     }
 }
 
+fn background_double_clicked(
+    ctx: &egui::Context,
+    layer: egui::LayerId,
+    viewport: egui::Rect,
+    foreground: &[egui::Rect],
+) -> bool {
+    if egui::Popup::is_any_open(ctx) {
+        return false;
+    }
+    let position = ctx.input(|input| {
+        input
+            .pointer
+            .button_double_clicked(egui::PointerButton::Primary)
+            .then(|| input.pointer.interact_pos())
+            .flatten()
+    });
+    position.is_some_and(|position| {
+        viewport.contains(position)
+            && ctx.layer_id_at(position) == Some(layer)
+            && !foreground.iter().any(|rect| rect.contains(position))
+    })
+}
+
 struct HeaderResponse {
     response: egui::Response,
     clicked: bool,
+    play_clicked: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Chevron {
+    Right,
+    Down,
+    Up,
+}
+
+fn paint_chevron(painter: &egui::Painter, center: egui::Pos2, direction: Chevron, color: Color32) {
+    let points = match direction {
+        Chevron::Right => [
+            egui::vec2(-2.5, -5.0),
+            egui::vec2(2.5, 0.0),
+            egui::vec2(-2.5, 5.0),
+        ],
+        Chevron::Down => [
+            egui::vec2(-5.0, -2.5),
+            egui::vec2(0.0, 2.5),
+            egui::vec2(5.0, -2.5),
+        ],
+        Chevron::Up => [
+            egui::vec2(-5.0, 2.5),
+            egui::vec2(0.0, -2.5),
+            egui::vec2(5.0, 2.5),
+        ],
+    };
+    painter.add(egui::Shape::line(
+        points.into_iter().map(|offset| center + offset).collect(),
+        Stroke::new(1.8, color),
+    ));
 }
 
 fn lesson_header(
@@ -2279,8 +2678,12 @@ fn lesson_header(
     width: f32,
     focus: bool,
     sticky: bool,
+    recording_summary: &str,
+    playback: Option<bool>,
+    play_enabled: bool,
 ) -> HeaderResponse {
     let mut clicked = false;
+    let mut play_clicked = false;
     let response = egui::Frame::new()
         .fill(Color32::from_gray(65))
         .stroke(Stroke::new(1.0, Color32::LIGHT_GRAY))
@@ -2291,18 +2694,83 @@ fn lesson_header(
                 Vec2::new((width - 8.0).max(0.0), 24.0),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    if ui.button(if lesson.expanded { "▼" } else { "▶" }).clicked() {
+                    let expand = ui
+                        .add(egui::Button::new("").min_size(Vec2::splat(24.0)))
+                        .on_hover_text(if lesson.expanded {
+                            "Collapse lesson"
+                        } else {
+                            "Expand lesson"
+                        });
+                    paint_chevron(
+                        ui.painter(),
+                        expand.rect.center(),
+                        if lesson.expanded {
+                            Chevron::Down
+                        } else {
+                            Chevron::Right
+                        },
+                        ui.visuals().widgets.inactive.fg_stroke.color,
+                    );
+                    if expand.clicked() {
                         lesson.expanded = !lesson.expanded;
                         clicked = true;
                     }
                     ui.add_space(8.0);
-                    let name = ui.add(
+                    let status_width = ui
+                        .fonts_mut(|fonts| {
+                            fonts
+                                .layout_no_wrap(
+                                    recording_summary.to_owned(),
+                                    egui::FontId::proportional(12.0),
+                                    Color32::WHITE,
+                                )
+                                .size()
+                                .x
+                                + 10.0
+                        })
+                        .min((ui.available_width() - 40.0).max(0.0));
+                    let button_width = 30.0;
+                    let name_width = (ui.available_width() - status_width - button_width).max(0.0);
+                    let name = ui.add_sized(
+                        [name_width, 24.0],
                         egui::TextEdit::singleline(&mut lesson.name)
                             .prefix(RichText::new(format!("Lesson {}: ", index + 1)).strong())
                             .id_salt(if sticky { "sticky_name" } else { "name" })
                             .hint_text("Lesson name")
-                            .desired_width((width - 55.0).max(40.0))
+                            .desired_width(name_width)
                             .frame(egui::Frame::NONE),
+                    );
+                    play_clicked = ui
+                        .add_enabled(
+                            play_enabled,
+                            egui::Button::new(if playback == Some(true) {
+                                "❚❚"
+                            } else {
+                                "▶"
+                            })
+                            .min_size(Vec2::new(button_width, 24.0)),
+                        )
+                        .on_hover_text(if playback == Some(true) {
+                            "Pause lesson"
+                        } else if playback == Some(false) {
+                            "Resume lesson"
+                        } else {
+                            "Play lesson"
+                        })
+                        .clicked();
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(status_width, 24.0),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(recording_summary)
+                                        .size(12.0)
+                                        .color(Color32::WHITE),
+                                )
+                                .truncate(),
+                            );
+                        },
                     );
                     if focus {
                         name.request_focus();
@@ -2315,7 +2783,8 @@ fn lesson_header(
         })
         .response;
     HeaderResponse {
-        clicked: clicked || response.clicked(),
+        clicked: !play_clicked && (clicked || response.clicked()),
+        play_clicked,
         response,
     }
 }
@@ -2346,11 +2815,10 @@ fn lesson_footer(ui: &mut egui::Ui, index: usize, name: &str, width: f32) -> egu
             egui::TextStyle::Button.resolve(ui.style()),
             Color32::WHITE,
         );
-    painter.text(
-        egui::pos2(rect.right() - 8.0, rect.center().y),
-        egui::Align2::RIGHT_CENTER,
-        "▲",
-        egui::TextStyle::Button.resolve(ui.style()),
+    paint_chevron(
+        painter,
+        egui::pos2(rect.right() - 14.0, rect.center().y),
+        Chevron::Up,
         Color32::WHITE,
     );
     response
@@ -2358,6 +2826,7 @@ fn lesson_footer(ui: &mut egui::Ui, index: usize, name: &str, width: f32) -> egu
 
 struct CardResponse {
     text: egui::Response,
+    bounds: egui::Rect,
     clicked: bool,
     right_clicked: bool,
     edit_requested: bool,
@@ -2372,6 +2841,28 @@ impl CardResponse {
                 || !editing
                 || !(self.text.clicked() || self.text.drag_started() || self.text.dragged()))
     }
+}
+
+fn audio_marker_rect(rect: egui::Rect, entry: &Entry) -> Option<egui::Rect> {
+    entry.audio.as_ref()?;
+    let x = match entry.participant {
+        Participant::Teacher => rect.right() + 3.0,
+        Participant::Student => rect.left() - 7.0,
+    };
+    Some(egui::Rect::from_min_max(
+        egui::pos2(x, rect.top() + 2.0),
+        egui::pos2(x + 4.0, (rect.bottom() - 2.0).max(rect.top() + 2.0)),
+    ))
+}
+
+fn entry_column_geometry(column_width: f32, participant: Participant) -> (f32, f32) {
+    let margin = 10.0
+        + if participant == Participant::Student {
+            AUDIO_MARKER_INSET
+        } else {
+            0.0
+        };
+    (margin, (column_width - 20.0 - AUDIO_MARKER_INSET).max(20.0))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -2495,6 +2986,9 @@ fn card(
             });
         });
     let text = text_response.expect("card text is always shown");
+    if let Some(rect) = audio_marker_rect(frame.response.rect, entry) {
+        ui.painter().rect_filled(rect, 0.0, AUDIO_MARKER_COLOR);
+    }
     let mut edit_requested = false;
     let mut audio_requested = false;
     if frame.response.container_contains_pointer() {
@@ -2562,6 +3056,10 @@ fn card(
     frame.response.container_context_menu(|ui| {
         let multiple = options.multiselect && options.selected;
         if multiple {
+            if ui.button("Duplicate selected").clicked() {
+                action = Some(MenuAction::Bulk(BulkAction::Duplicate));
+                ui.close();
+            }
             for (visible, label, choice) in [
                 (
                     options.has_teacher,
@@ -2606,6 +3104,10 @@ fn card(
                 ui.close();
             }
         } else {
+            if ui.button("Duplicate").clicked() {
+                action = Some(MenuAction::Single(EntryAction::Duplicate));
+                ui.close();
+            }
             if matches!(entry.language, Language::Latin) && ui.button("Auto-macronize").clicked() {
                 action = Some(MenuAction::Single(EntryAction::AutoMacronize));
                 ui.close();
@@ -2656,6 +3158,7 @@ fn card(
         || frame.response.container_clicked();
     CardResponse {
         text,
+        bounds: frame.response.rect,
         clicked,
         right_clicked,
         edit_requested,
@@ -2667,6 +3170,147 @@ fn card(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_wav(frames: usize, rate: u32) -> String {
+        use base64::Engine;
+        let mut output = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = hound::WavWriter::new(
+                &mut output,
+                hound::WavSpec {
+                    channels: 2,
+                    sample_rate: rate,
+                    bits_per_sample: 16,
+                    sample_format: hound::SampleFormat::Int,
+                },
+            )
+            .unwrap();
+            for _ in 0..frames * 2 {
+                writer.write_sample(0i16).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        base64::engine::general_purpose::STANDARD.encode(output.into_inner())
+    }
+
+    #[test]
+    fn lesson_recording_summary_counts_clips_and_gaps() {
+        let entry = |audio| Entry {
+            participant: Participant::Teacher,
+            language: Language::Latin,
+            text: String::new(),
+            audio,
+        };
+        let mut lesson = Lesson {
+            name: "First".into(),
+            expanded: false,
+            entries: Vec::new(),
+        };
+        assert_eq!(
+            lesson_recording_summary(&lesson, project::AudioGaps::default()),
+            "Recordings incomplete"
+        );
+        lesson.entries.push(entry(Some(test_wav(4, 4))));
+        assert_eq!(
+            lesson_recording_summary(&lesson, project::AudioGaps::default()),
+            "00:01.0"
+        );
+        lesson.entries.push(entry(None));
+        assert_eq!(
+            lesson_recording_summary(&lesson, project::AudioGaps::default()),
+            "Recordings incomplete"
+        );
+        lesson.entries[1].audio = Some(test_wav(8, 4));
+        assert_eq!(
+            lesson_recording_summary(&lesson, project::AudioGaps::default()),
+            "00:03.1"
+        );
+        lesson.entries[1].participant = Participant::Student;
+        assert_eq!(
+            lesson_recording_summary(&lesson, project::AudioGaps::default()),
+            "00:03.5"
+        );
+        assert_eq!(
+            lesson_recording_summary(
+                &lesson,
+                project::AudioGaps {
+                    same_participant_ms: 200,
+                    different_participant_ms: 1200
+                }
+            ),
+            "00:04.2"
+        );
+        lesson.entries[1].audio = Some("invalid".into());
+        assert_eq!(
+            lesson_recording_summary(&lesson, project::AudioGaps::default()),
+            "Recordings incomplete"
+        );
+        lesson.entries = vec![entry(Some(test_wav(3600, 1)))];
+        assert_eq!(
+            lesson_recording_summary(&lesson, project::AudioGaps::default()),
+            "1:00:00.0"
+        );
+    }
+
+    #[test]
+    fn cached_lesson_recording_summaries_follow_history_and_new_entries() {
+        let mut app = sample_app();
+        app.lessons[0].entries.truncate(1);
+        assert_eq!(app.recording_summaries()[0], "Recordings incomplete");
+        let command = Command::SetAudio {
+            lesson: 0,
+            index: 0,
+            before: None,
+            after: Some(test_wav(4, 4)),
+        };
+        app.apply_command(command.clone(), true);
+        app.history.push(command);
+        assert_eq!(app.recording_summaries()[0], "00:01.0");
+        app.undo();
+        assert_eq!(app.recording_summaries()[0], "Recordings incomplete");
+        app.redo();
+        assert_eq!(app.recording_summaries()[0], "00:01.0");
+        app.add(Participant::Student, Language::Latin);
+        assert_eq!(app.recording_summaries()[0], "Recordings incomplete");
+        app.undo();
+        assert_eq!(app.recording_summaries()[0], "00:01.0");
+    }
+
+    #[test]
+    fn gap_settings_and_participant_changes_refresh_duration_and_undo() {
+        let mut app = sample_app();
+        app.lessons[0].entries.truncate(2);
+        for entry in &mut app.lessons[0].entries {
+            entry.participant = Participant::Teacher;
+            entry.audio = Some(test_wav(4, 4));
+        }
+        assert_eq!(app.recording_summaries()[0], "00:02.1");
+        let before = app.audio_gaps;
+        let after = project::AudioGaps {
+            same_participant_ms: 700,
+            different_participant_ms: 1200,
+        };
+        let command = Command::SetAudioGaps { before, after };
+        app.apply_command(command.clone(), true);
+        app.history.push(command);
+        assert_eq!(app.recording_summaries()[0], "00:02.7");
+        assert_eq!(app.project_snapshot().audio_gaps, after);
+        app.undo();
+        assert_eq!(app.recording_summaries()[0], "00:02.1");
+        app.redo();
+        assert_eq!(app.recording_summaries()[0], "00:02.7");
+        let language = app.lessons[0].entries[1].language;
+        app.apply_command(
+            Command::SetEntryKind {
+                lesson: 0,
+                index: 1,
+                before: (Participant::Teacher, language),
+                after: (Participant::Student, Language::Latin),
+            },
+            true,
+        );
+        assert_eq!(app.recording_summaries()[0], "00:03.2");
+    }
 
     fn sample_app() -> App {
         let entries = [
@@ -2697,6 +3341,144 @@ mod tests {
         let mut app = App::default();
         app.replace_project(project, None);
         app
+    }
+
+    #[test]
+    fn escape_stops_editing_then_deselects_all_entries() {
+        let mut app = sample_app();
+        app.set_selection(vec![(0, 1), (0, 3)], Some((0, 3)));
+        app.editing_entry = Some((0, 3));
+        let ctx = egui::Context::default();
+        let input = || egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input(), |ui| {
+            app.handle_shortcuts(ui);
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.editing_entry, None);
+        assert_eq!(app.selection(), vec![(0, 1), (0, 3)]);
+        let mut output = ctx.run_ui(input(), |ui| {
+            app.handle_shortcuts(ui);
+        });
+        output.textures_delta.clear();
+        assert!(app.selection().is_empty());
+        assert_eq!(app.selection_anchor, None);
+        assert!(!app.is_dirty());
+    }
+
+    #[test]
+    fn double_click_on_background_deselects_but_not_on_entry() {
+        use std::cell::Cell;
+        for on_entry in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = sample_app();
+            app.set_selection(vec![(0, 1), (0, 3)], Some((0, 3)));
+            let bounds = Cell::new(egui::Rect::NOTHING);
+            let mut frame = |events, time| {
+                let input = egui::RawInput {
+                    time: Some(time),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(600.0, 400.0),
+                    )),
+                    events,
+                    ..Default::default()
+                };
+                let mut output = ctx.run_ui(input, |ui| {
+                    let viewport = ui.max_rect();
+                    let response = card(
+                        ui,
+                        &mut app.lessons[0].entries[0],
+                        "English",
+                        250.0,
+                        false,
+                        false,
+                        false,
+                        EntryMenuOptions::default(),
+                    );
+                    bounds.set(response.bounds);
+                    if background_double_clicked(
+                        ui.ctx(),
+                        ui.layer_id(),
+                        viewport,
+                        &[response.bounds.expand(8.0)],
+                    ) {
+                        app.deselect_entries();
+                    }
+                });
+                output.textures_delta.clear();
+            };
+            frame(Vec::new(), 0.0);
+            let position = if on_entry {
+                bounds.get().center()
+            } else {
+                egui::pos2(500.0, 300.0)
+            };
+            let event = |pressed| egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(vec![egui::Event::PointerMoved(position), event(true)], 0.1);
+            frame(vec![event(false)], 0.12);
+            frame(vec![event(true)], 0.2);
+            frame(vec![event(false)], 0.22);
+            if on_entry {
+                assert_eq!(app.selection(), vec![(0, 1), (0, 3)]);
+            } else {
+                assert!(app.selection().is_empty());
+                assert_eq!(app.selection_anchor, None);
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_entries_preserves_audio_and_is_undoable() {
+        let mut app = sample_app();
+        app.lessons[0].entries[1].audio = Some(test_wav(4, 4));
+        let original = app.lessons.clone();
+        app.set_selection(vec![(0, 1)], Some((0, 1)));
+        assert!(app.selected_entry_shortcut(keybinds::Action::DuplicateEntry));
+        assert_eq!(app.lessons[0].entries[2], original[0].entries[1]);
+        assert_eq!(app.selection(), vec![(0, 2)]);
+        app.undo();
+        assert_eq!(app.lessons, original);
+        assert_eq!(app.selection(), vec![(0, 1)]);
+        app.redo();
+        assert_eq!(app.lessons[0].entries[2], original[0].entries[1]);
+        assert_eq!(app.selection(), vec![(0, 2)]);
+    }
+
+    #[test]
+    fn duplicates_multiple_entries_in_their_original_lessons() {
+        let mut app = sample_app();
+        app.lessons.push(Lesson {
+            name: "Second".into(),
+            entries: app.lessons[0].entries[..2].to_vec(),
+            expanded: true,
+        });
+        let original = app.lessons.clone();
+        app.set_selection(vec![(0, 0), (0, 2), (1, 1)], Some((0, 2)));
+        assert!(app.selected_entry_shortcut(keybinds::Action::DuplicateEntry));
+        assert_eq!(app.lessons[0].entries[1], original[0].entries[0]);
+        assert_eq!(app.lessons[0].entries[4], original[0].entries[2]);
+        assert_eq!(app.lessons[1].entries[2], original[1].entries[1]);
+        assert_eq!(app.selection(), vec![(0, 1), (0, 4), (1, 2)]);
+        assert_eq!(app.selected_entry, Some((0, 4)));
+        app.undo();
+        assert_eq!(app.lessons, original);
+        assert_eq!(app.selection(), vec![(0, 0), (0, 2), (1, 1)]);
+        app.redo();
+        assert_eq!(app.selection(), vec![(0, 1), (0, 4), (1, 2)]);
     }
 
     #[test]
@@ -2749,7 +3531,7 @@ mod tests {
         app.history.push(command);
         assert!(app.is_dirty());
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("audio.toml");
+        let path = dir.path().join("audio.loqr");
         app.project_snapshot().save(&path).unwrap();
         assert_eq!(
             project::Project::load(&path).unwrap().lessons[0].entries[1]
@@ -2765,6 +3547,57 @@ mod tests {
         assert_eq!(app.lessons[0].entries[2].audio.as_deref(), Some("UklGRg=="));
         app.undo();
         assert_eq!(app.lessons[0].entries[1].audio.as_deref(), Some("UklGRg=="));
+    }
+
+    #[test]
+    fn audio_marker_is_only_shown_on_the_inner_side_of_attached_entries() {
+        let rect = egui::Rect::from_min_max(egui::pos2(100.0, 20.0), egui::pos2(200.0, 80.0));
+        let mut entry = Entry {
+            participant: Participant::Teacher,
+            language: Language::Latin,
+            text: String::new(),
+            audio: None,
+        };
+        assert!(audio_marker_rect(rect, &entry).is_none());
+        entry.audio = Some("clip".into());
+        let teacher = audio_marker_rect(rect, &entry).unwrap();
+        assert!(teacher.left() > rect.right());
+        assert_eq!(teacher.width(), 4.0);
+        entry.participant = Participant::Student;
+        let student = audio_marker_rect(rect, &entry).unwrap();
+        assert!(student.right() < rect.left());
+        assert_eq!(student.width(), 4.0);
+    }
+
+    #[test]
+    fn entry_markers_remain_outside_the_center_scrollbar() {
+        let column_width = 200.0;
+        let track =
+            egui::Rect::from_center_size(egui::pos2(column_width, 50.0), Vec2::new(14.0, 100.0));
+        for participant in [Participant::Teacher, Participant::Student] {
+            let (margin, width) = entry_column_geometry(column_width, participant);
+            let column_left = if participant == Participant::Student {
+                column_width
+            } else {
+                0.0
+            };
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(column_left + margin, 20.0),
+                Vec2::new(width, 60.0),
+            );
+            let entry = Entry {
+                participant,
+                language: Language::Latin,
+                text: String::new(),
+                audio: Some("clip".into()),
+            };
+            let marker = audio_marker_rect(rect, &entry).unwrap();
+            if participant == Participant::Teacher {
+                assert!(marker.right() < track.left());
+            } else {
+                assert!(marker.left() > track.right());
+            }
+        }
     }
 
     #[test]
@@ -2820,7 +3653,7 @@ mod tests {
     #[test]
     fn successful_open_and_save_update_recent_projects() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("course.toml");
+        let path = directory.path().join("course.loqr");
         let source = sample_app().project_snapshot();
         source.save(&path).unwrap();
 
@@ -3056,7 +3889,7 @@ mod tests {
                 entries: vec![],
             }],
         );
-        app.replace_project(project.clone(), Some("example.toml".into()));
+        app.replace_project(project.clone(), Some("example.loqr".into()));
         assert_eq!(app.project_snapshot(), project);
         assert!(!app.is_dirty());
         assert_eq!(app.selected_entry, None);
