@@ -274,42 +274,82 @@ impl Lemmatizer {
     /// Analyze and contextually tag the text, resetting at sentence punctuation.
     /// Unknown words remain in the output with no selected tag.
     pub fn tag_text(&self, text: &str) -> Vec<TaggedWord> {
+        self.tag_text_with(text, |word, sentence_start| {
+            self.analyze(word, sentence_start)
+        })
+    }
+
+    /// Analyze and tag text using caller-provided lexical analyses. This lets
+    /// applications reuse analyses across repeated words while keeping the
+    /// contextual sequence model local to this text.
+    pub fn tag_text_with(
+        &self,
+        text: &str,
+        mut analyze: impl FnMut(&str, bool) -> Vec<Analysis>,
+    ) -> Vec<TaggedWord> {
         let mut words = Vec::new();
-        let mut start = None;
         let mut sentence_start = 0;
-        for (offset, ch) in text
-            .char_indices()
-            .chain(std::iter::once((text.len(), '\0')))
-        {
-            if ch.is_alphabetic()
-                || (start.is_some() && matches!(ch, '\u{0304}' | '\u{0306}' | '\u{0301}'))
-            {
-                if start.is_none() {
-                    start = Some(offset);
-                }
-                continue;
-            }
-            if let Some(begin) = start.take() {
-                let word = &text[begin..offset];
-                let analyses = self.analyze(word, words.len() == sentence_start);
-                words.push(TaggedWord {
-                    text: word.to_owned(),
-                    range: begin..offset,
-                    analyses,
-                    tag: None,
-                    selected: None,
-                });
-            }
-            if matches!(ch, '.' | '!' | '?' | ';')
-                && !words
-                    .last()
-                    .is_some_and(|w| ch == '.' && data::ABBREVIATIONS.contains(&w.text.as_str()))
-            {
+        for token in tokenize(text) {
+            if token.sentence_start && words.len() > sentence_start {
                 tag_sentence(&mut words[sentence_start..]);
                 sentence_start = words.len();
             }
+            let token_text = &text[token.range.clone()];
+            words.push(TaggedWord {
+                analyses: analyze(token_text, token.sentence_start),
+                text: token_text.to_owned(),
+                range: token.range,
+                tag: None,
+                selected: None,
+            });
         }
         tag_sentence(&mut words[sentence_start..]);
         words
     }
+}
+
+/// A tokenized word in source text. Ranges are UTF-8 byte offsets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextToken {
+    pub range: std::ops::Range<usize>,
+    pub sentence_start: bool,
+}
+
+/// Split text using the same Latin-word and sentence-boundary rules as
+/// contextual tagging, without performing dictionary analysis.
+pub fn tokenize(text: &str) -> Vec<TextToken> {
+    let mut words = Vec::new();
+    let mut start = None;
+    let mut next_sentence_start = true;
+    for (offset, ch) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), '\0')))
+    {
+        if ch.is_alphabetic()
+            || (start.is_some() && matches!(ch, '\u{0304}' | '\u{0306}' | '\u{0301}'))
+        {
+            if start.is_none() {
+                start = Some(offset);
+            }
+            continue;
+        }
+        if let Some(begin) = start.take() {
+            words.push(TextToken {
+                range: begin..offset,
+                sentence_start: next_sentence_start,
+            });
+            next_sentence_start = false;
+        }
+        if matches!(ch, '.' | '!' | '?' | ';')
+            && !words.last().is_some_and(|word: &TextToken| {
+                ch == '.'
+                    && data::ABBREVIATIONS
+                        .iter()
+                        .any(|abbreviation| *abbreviation == &text[word.range.clone()])
+            })
+        {
+            next_sentence_start = true;
+        }
+    }
+    words
 }

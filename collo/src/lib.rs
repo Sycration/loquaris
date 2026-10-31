@@ -89,6 +89,10 @@ mod data {
     include!(concat!(env!("OUT_DIR"), "/data.rs"));
 }
 
+/// Stable fingerprint for cached lexical analyses. It changes when the
+/// generated lexicon, lookup implementation, or normalization rules change.
+pub const ANALYSIS_CACHE_FINGERPRINT: u64 = data::ANALYSIS_CACHE_FINGERPRINT;
+
 /// Options for analysis. The extension lexicon is disabled by default.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Lemmatizer {

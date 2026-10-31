@@ -825,8 +825,8 @@ impl Editor {
 
 fn show_entry_context(ui: &mut egui::Ui, entry: &crate::Entry, l1_name: &str) {
     let (background, accent, language) = match entry.language {
-        crate::Language::L1 => (crate::L1_COLOR, crate::L1_ACCENT, l1_name),
-        crate::Language::Latin => (crate::LATIN_COLOR, crate::LATIN_ACCENT, "Latin"),
+        crate::Language::L1 => (crate::ui::L1_COLOR, crate::ui::L1_ACCENT, l1_name),
+        crate::Language::Latin => (crate::ui::LATIN_COLOR, crate::ui::LATIN_ACCENT, "Latin"),
     };
     let participant = match entry.participant {
         crate::Participant::Teacher => "Teacher",
@@ -848,7 +848,7 @@ fn show_entry_context(ui: &mut egui::Ui, entry: &crate::Entry, l1_name: &str) {
                 ui.label(egui::RichText::new("·").size(12.0).color(accent));
                 ui.label(
                     egui::RichText::new(language)
-                        .font(crate::entry_font(entry.language, 12.0))
+                        .font(crate::ui::entry_font(entry.language, 12.0))
                         .color(accent)
                         .strong(),
                 );
@@ -856,7 +856,7 @@ fn show_entry_context(ui: &mut egui::Ui, entry: &crate::Entry, l1_name: &str) {
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new(&entry.text)
-                    .font(crate::entry_font(entry.language, 15.0))
+                    .font(crate::ui::entry_font(entry.language, 15.0))
                     .color(egui::Color32::WHITE),
             );
         });

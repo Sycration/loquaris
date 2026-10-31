@@ -109,6 +109,7 @@ fn common_vowels(text: &str) -> String {
 fn main() {
     println!("cargo:rerun-if-changed=data");
     println!("cargo:rerun-if-changed=src/normalize.rs");
+    println!("cargo:rerun-if-changed=src/lib.rs");
     let mut vars = HashMap::new();
     let mut groups: Vec<Vec<String>> = Vec::new();
     for line in lines("data/modeles.la") {
@@ -490,6 +491,21 @@ fn main() {
         output,
         "pub static ABBREVIATIONS: &[&str] = &{:?};",
         abbreviations
+    )
+    .unwrap();
+    let mut fingerprint = 0xcbf29ce484222325u64;
+    for byte in output
+        .as_bytes()
+        .iter()
+        .chain(include_bytes!("src/lib.rs"))
+        .chain(include_bytes!("src/normalize.rs"))
+    {
+        fingerprint ^= u64::from(*byte);
+        fingerprint = fingerprint.wrapping_mul(0x100000001b3);
+    }
+    writeln!(
+        output,
+        "pub const ANALYSIS_CACHE_FINGERPRINT: u64 = {fingerprint};"
     )
     .unwrap();
     fs::write(

@@ -18,8 +18,18 @@ pub enum Outcome {
 }
 
 impl Review {
+    #[cfg(test)]
     pub fn new(lesson: usize, entry: usize, original: String) -> Self {
         let words = collo::Lemmatizer::new().tag_text(&original);
+        Self::from_tagged_words(lesson, entry, original, words)
+    }
+
+    pub fn from_tagged_words(
+        lesson: usize,
+        entry: usize,
+        original: String,
+        words: Vec<collo::tagging::TaggedWord>,
+    ) -> Self {
         let choices = words
             .iter()
             .map(|word| {
@@ -99,7 +109,7 @@ impl Review {
             egui::ScrollArea::vertical().id_salt("review_words").max_height(70.0).show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     for index in 0..self.words.len() {
-                        let label = RichText::new(self.word_preview(index)).font(crate::entry_font(crate::Language::Latin, 15.0));
+                        let label = RichText::new(self.word_preview(index)).font(crate::ui::entry_font(crate::Language::Latin, 15.0));
                         if ui.selectable_label(self.selected_word == Some(index), label).clicked() { self.selected_word = Some(index); }
                     }
                 });
@@ -123,7 +133,7 @@ impl Review {
                             let description = analysis.morphology("en").unwrap_or("unknown morphology");
                             let preferred = if word.selected == Some(candidate) { " · collo's choice" } else { "" };
                             let mut label = egui::text::LayoutJob::default();
-                            let latin = egui::TextFormat { font_id: crate::entry_font(crate::Language::Latin, 15.0), color: ui.visuals().text_color(), ..Default::default() };
+                            let latin = egui::TextFormat { font_id: crate::ui::entry_font(crate::Language::Latin, 15.0), color: ui.visuals().text_color(), ..Default::default() };
                             let default = egui::TextFormat { font_id: egui::FontId::proportional(15.0), color: ui.visuals().text_color(), ..Default::default() };
                             label.append(spelling.as_deref().unwrap_or("Spelling cannot be aligned"), 0.0, if spelling.is_some() { latin.clone() } else { default.clone() });
                             label.append(" — ", 0.0, default.clone());

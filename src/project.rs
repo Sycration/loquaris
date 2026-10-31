@@ -4,7 +4,7 @@ use std::{io::Write, path::Path};
 use crate::{Language, Lesson, Participant};
 
 const MAGIC: &[u8; 8] = b"LOQUARIS";
-const ARCHIVE_VERSION: u32 = 2;
+const ARCHIVE_VERSION: u32 = 3;
 const HEADER_SIZE: usize = 16;
 
 // This schema is fixed for archive version 1. rkyv is configured for little
@@ -24,6 +24,14 @@ struct DiskProjectV2 {
     project: DiskProject,
     same_participant_ms: u32,
     different_participant_ms: u32,
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct DiskProjectV3 {
+    project: DiskProject,
+    same_participant_ms: u32,
+    different_participant_ms: u32,
+    word_cache: crate::word_index::PersistedCache,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,13 +126,24 @@ pub fn ensure_extension(path: &Path) -> (std::path::PathBuf, bool) {
     (name.into(), true)
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Project {
     pub name: String,
     pub l1_name: String,
     pub lessons: Vec<Lesson>,
     pub export_settings: crate::export_pdf::Settings,
     pub audio_gaps: AudioGaps,
+    pub word_cache: crate::word_index::PersistedCache,
+}
+
+impl PartialEq for Project {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.l1_name == other.l1_name
+            && self.lessons == other.lessons
+            && self.export_settings == other.export_settings
+            && self.audio_gaps == other.audio_gaps
+    }
 }
 
 impl Project {
@@ -135,6 +154,7 @@ impl Project {
             lessons,
             export_settings: crate::export_pdf::Settings::default(),
             audio_gaps: AudioGaps::default(),
+            word_cache: crate::word_index::PersistedCache::default(),
         }
     }
 
@@ -168,7 +188,7 @@ impl Project {
             return Err("Truncated project header.".into());
         }
         let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        if version != 1 && version != ARCHIVE_VERSION {
+        if !(1..=ARCHIVE_VERSION).contains(&version) {
             return Err(format!("Unsupported project archive version {version}."));
         }
         if bytes[12..HEADER_SIZE] != [0; 4] {
@@ -176,24 +196,40 @@ impl Project {
         }
         let mut aligned = rkyv::util::AlignedVec::<16>::new();
         aligned.extend_from_slice(&bytes[HEADER_SIZE..]);
-        let (disk, gaps) = if version == 1 {
-            (
+        let (disk, gaps, word_cache) = match version {
+            1 => (
                 rkyv::from_bytes::<DiskProject, rkyv::rancor::Error>(&aligned)
                     .map_err(|error| format!("Invalid project archive: {error}"))?,
                 AudioGaps::default(),
-            )
-        } else {
-            let disk = rkyv::from_bytes::<DiskProjectV2, rkyv::rancor::Error>(&aligned)
-                .map_err(|error| format!("Invalid project archive: {error}"))?;
-            (
-                disk.project,
-                AudioGaps {
-                    same_participant_ms: disk.same_participant_ms,
-                    different_participant_ms: disk.different_participant_ms,
-                },
-            )
+                crate::word_index::PersistedCache::default(),
+            ),
+            2 => {
+                let disk = rkyv::from_bytes::<DiskProjectV2, rkyv::rancor::Error>(&aligned)
+                    .map_err(|error| format!("Invalid project archive: {error}"))?;
+                (
+                    disk.project,
+                    AudioGaps {
+                        same_participant_ms: disk.same_participant_ms,
+                        different_participant_ms: disk.different_participant_ms,
+                    },
+                    crate::word_index::PersistedCache::default(),
+                )
+            }
+            3 => {
+                let disk = rkyv::from_bytes::<DiskProjectV3, rkyv::rancor::Error>(&aligned)
+                    .map_err(|error| format!("Invalid project archive: {error}"))?;
+                (
+                    disk.project,
+                    AudioGaps {
+                        same_participant_ms: disk.same_participant_ms,
+                        different_participant_ms: disk.different_participant_ms,
+                    },
+                    disk.word_cache,
+                )
+            }
+            _ => unreachable!(),
         };
-        let mut project = Self::from_disk(disk)?;
+        let mut project = Self::from_disk(disk, word_cache)?;
         project.audio_gaps = gaps;
         project.validate()?;
         Ok(project)
@@ -201,10 +237,11 @@ impl Project {
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
         self.validate()?;
-        let disk = DiskProjectV2 {
+        let disk = DiskProjectV3 {
             project: self.to_disk()?,
             same_participant_ms: self.audio_gaps.same_participant_ms,
             different_participant_ms: self.audio_gaps.different_participant_ms,
+            word_cache: self.word_cache.clone(),
         };
         let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&disk)
             .map_err(|error| format!("Could not serialize project: {error}"))?;
@@ -274,7 +311,10 @@ impl Project {
         })
     }
 
-    fn from_disk(disk: DiskProject) -> Result<Self, String> {
+    fn from_disk(
+        disk: DiskProject,
+        word_cache: crate::word_index::PersistedCache,
+    ) -> Result<Self, String> {
         let paper = match disk.export_paper {
             0 => crate::export_pdf::Paper::A4,
             1 => crate::export_pdf::Paper::Letter,
@@ -315,6 +355,7 @@ impl Project {
             font_size: disk.export_font_size,
             directory: disk.export_directory.map(std::path::PathBuf::from),
         };
+        project.word_cache = word_cache;
         Ok(project)
     }
 }
@@ -384,15 +425,43 @@ mod tests {
         let mut project = example();
         let audio = vec![0x85; 8192];
         project.lessons[0].entries[0].audio = Some(audio.clone().into());
+        project.word_cache = crate::word_index::WordIndex::from_project(
+            &crate::word_index::PersistedCache::default(),
+            &project.lessons,
+        )
+        .persisted_cache();
         project.save(&path).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.starts_with(MAGIC));
         assert!(bytes.windows(audio.len()).any(|window| window == audio));
-        assert_eq!(Project::load(&path).unwrap(), project);
+        let loaded = Project::load(&path).unwrap();
+        assert_eq!(loaded, project);
+        assert_eq!(loaded.word_cache, project.word_cache);
         let mut changed = project.clone();
         changed.name = "Changed".into();
         changed.save(&path).unwrap();
         assert_eq!(Project::load(&path).unwrap(), changed);
+    }
+
+    #[test]
+    fn version_two_projects_load_without_a_word_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("version-two.loqr");
+        let project = example();
+        let disk = DiskProjectV2 {
+            project: project.to_disk().unwrap(),
+            same_participant_ms: project.audio_gaps.same_participant_ms,
+            different_participant_ms: project.audio_gaps.different_participant_ms,
+        };
+        let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&disk).unwrap();
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&[0; 4]);
+        bytes.extend_from_slice(&archive);
+        std::fs::write(&path, bytes).unwrap();
+        let loaded = Project::load(&path).unwrap();
+        assert_eq!(loaded, project);
+        assert!(loaded.word_cache.words.is_empty());
     }
 
     #[test]
