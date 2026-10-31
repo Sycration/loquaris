@@ -3,6 +3,7 @@
 //! Data is compiled into the library at build time. Lookups preserve case by
 //! default and ignore vowel quantity and the distinctions i/j and u/v.
 //! Analyses are alternatives, not contextual disambiguation.
+mod hash;
 mod normalize;
 pub mod scansion;
 pub mod tagging;
@@ -65,18 +66,36 @@ pub fn morphology(id: u16, language: &str) -> Option<&'static str> {
         .and_then(|i| list.get(i as usize))
         .copied()
 }
+/// A string in `data::TEXT`, as a byte offset and length.
+#[derive(Clone, Copy)]
+struct Text(u32, u16);
+impl Text {
+    fn get(self) -> &'static str {
+        let start = self.0 as usize;
+        &data::TEXT[start..start + usize::from(self.1)]
+    }
+}
 struct Stem {
-    key: &'static str,
+    key: Text,
     lemma: usize,
+    /// Index of the lemma's model in `MODEL_NAMES`.
+    model: u16,
     number: u8,
-    text: &'static str,
+    extension: bool,
+    /// Counts of `v`, `āe` plus `prăe`, and `ōe` in the lowercase text.
+    v: u8,
+    ae: u8,
+    oe: u8,
+    text: Text,
 }
 struct Ending {
-    key: &'static str,
-    model: usize,
+    key: Text,
+    model: u16,
     stem: u8,
     morphology: u16,
-    text: &'static str,
+    /// Count of `v` in the text.
+    v: u8,
+    text: Text,
 }
 struct Irregular {
     key: &'static str,
@@ -84,8 +103,25 @@ struct Irregular {
     morphology: u16,
     text: &'static str,
 }
+/// The contiguous run of entries whose key is `key`, located through a
+/// build-time hash index of each run's first entry.
+fn lookup<'a, T>(index: &[u32], entries: &'a [T], key: &str, key_of: fn(&T) -> &str) -> &'a [T] {
+    let mask = index.len() - 1;
+    let mut slot = hash::slot(key, index.len());
+    loop {
+        let position = index[slot];
+        if position == hash::EMPTY {
+            return &[];
+        }
+        let run = &entries[position as usize..];
+        if key_of(&run[0]) == key {
+            return &run[..run.partition_point(|entry| key_of(entry) == key)];
+        }
+        slot = (slot + 1) & mask;
+    }
+}
 mod data {
-    use super::{Ending, Irregular, Lemma, Stem};
+    use super::{Ending, Irregular, Lemma, Stem, Text};
     include!(concat!(env!("OUT_DIR"), "/data.rs"));
 }
 
@@ -104,10 +140,7 @@ impl Lemmatizer {
     }
     /// Generate the attested forms of a dictionary entry, indexed by morphology.
     pub fn inflect(&self, lemma: &'static Lemma) -> Vec<InflectedForm> {
-        let Some(id) = data::LEMMAS
-            .iter()
-            .position(|entry| std::ptr::eq(entry, lemma))
-        else {
+        let Some(id) = lemma_index(lemma) else {
             return Vec::new();
         };
         if lemma.extension && !self.include_extension {
@@ -121,17 +154,24 @@ impl Lemmatizer {
                 irregular: true,
             });
         }
-        for stem in data::STEMS.iter().filter(|stem| stem.lemma == id) {
-            for ending in data::ENDINGS.iter().filter(|ending| {
-                data::MODEL_NAMES[ending.model] == lemma.model && ending.stem == stem.number
-            }) {
+        let model = data::LEMMA_MODELS[id] as usize;
+        let stems = &data::STEMS_BY_LEMMA
+            [data::LEMMA_STEM_STARTS[id] as usize..data::LEMMA_STEM_STARTS[id + 1] as usize];
+        let endings = &data::ENDINGS_BY_MODEL[data::MODEL_ENDING_STARTS[model] as usize
+            ..data::MODEL_ENDING_STARTS[model + 1] as usize];
+        for stem in stems.iter().map(|&i| &data::STEMS[i as usize]) {
+            for ending in endings
+                .iter()
+                .map(|&i| &data::ENDINGS[i as usize])
+                .filter(|ending| ending.stem == stem.number)
+            {
                 if data::EXCLUSIONS
                     .binary_search(&(id, ending.morphology))
                     .is_err()
                 {
                     forms.push(InflectedForm {
                         morphology_id: ending.morphology,
-                        form: format!("{}{}", stem.text, ending.text),
+                        form: format!("{}{}", stem.text.get(), ending.text.get()),
                         irregular: false,
                     });
                 }
@@ -304,13 +344,18 @@ impl Lemmatizer {
         result
     }
     fn direct(&self, word: &str, original: &str, result: &mut Vec<Analysis>) {
-        let input = original.to_lowercase();
-        let v_count = input.matches('v').count();
-        let ae = input
-            .matches('æ')
-            .count()
-            .saturating_sub(usize::from(input.ends_with('æ')));
-        let oe = input.matches('œ').count();
+        // Counts in the lowercase input; none of these letters is affected by
+        // context-sensitive lowercasing.
+        let (mut v_count, mut ae, mut oe) = (0, 0, 0);
+        for c in original.chars() {
+            match c {
+                'v' | 'V' => v_count += 1,
+                'æ' | 'Æ' => ae += 1,
+                'œ' | 'Œ' => oe += 1,
+                _ => (),
+            }
+        }
+        let ae = ae - usize::from(original.ends_with(['æ', 'Æ']));
         let start = data::IRREGULARS.partition_point(|x| x.key < word);
         for entry in data::IRREGULARS[start..]
             .iter()
@@ -332,9 +377,14 @@ impl Lemmatizer {
             .char_indices()
             .chain(std::iter::once((word.len(), '\0')))
         {
+            if word.len() - offset > data::LONGEST_ENDING {
+                continue;
+            }
             let (stem, ending) = word.split_at(offset);
-            let start = data::ENDINGS.partition_point(|x| x.key < ending);
-            let candidates = &data::ENDINGS[start..];
+            let candidates = lookup(data::ENDING_INDEX, data::ENDINGS, ending, |e| e.key.get());
+            if candidates.is_empty() {
+                continue;
+            }
             for extra in [false, true] {
                 if extra
                     && (!ending.starts_with('i') || ending.starts_with("ii") || stem.ends_with('i'))
@@ -348,52 +398,50 @@ impl Lemmatizer {
                 } else {
                     stem
                 };
-                let start = data::STEMS.partition_point(|x| x.key < stem);
-                for root in data::STEMS[start..].iter().take_while(|x| x.key == stem) {
-                    let lemma = &data::LEMMAS[root.lemma];
-                    if !self.include_extension && lemma.extension {
+                for root in lookup(data::STEM_INDEX, data::STEMS, stem, |s| s.key.get()) {
+                    if !self.include_extension && root.extension {
                         continue;
                     }
-                    for ending in candidates.iter().take_while(|x| x.key == ending) {
-                        if root.number != ending.stem
-                            || data::MODEL_NAMES[ending.model] != lemma.model
-                            || data::EXCLUSIONS
+                    // Entries sharing a key are sorted by model, then stem number.
+                    let group = (root.model, root.number);
+                    let first = candidates.partition_point(|e| (e.model, e.stem) < group);
+                    let matching = &candidates[first..];
+                    let matching =
+                        &matching[..matching.partition_point(|e| (e.model, e.stem) == group)];
+                    for ending in matching {
+                        if data::EXCLUSIONS
                                 .binary_search(&(root.lemma, ending.morphology))
                                 .is_ok()
                         {
                             continue;
                         }
-                        let root_lower = root.text.to_lowercase();
-                        let expected_v =
-                            root_lower.matches('v').count() + ending.text.matches('v').count();
+                        let root_v = usize::from(root.v);
+                        let expected_v = root_v + usize::from(ending.v);
                         let capital_v = original.starts_with('V')
-                            && root.key.starts_with('U')
-                            && v_count == root_lower.matches('v').count() + 1;
+                            && root.key.get().starts_with('U')
+                            && v_count == root_v + 1;
                         if v_count > 0 && v_count != expected_v && !capital_v {
                             continue;
                         }
-                        if ae > 0
-                            && ae
-                                != root_lower.matches("āe").count()
-                                    + root_lower.matches("prăe").count()
-                        {
+                        if ae > 0 && ae != usize::from(root.ae) {
                             continue;
                         }
-                        if oe > 0 && oe != root_lower.matches("ōe").count() {
+                        if oe > 0 && oe != usize::from(root.oe) {
                             continue;
                         }
+                        let lemma = &data::LEMMAS[root.lemma];
                         let form = if extra
                             && root
-                                .text
+                                .text.get()
                                 .trim_end_matches('\u{0306}')
                                 .ends_with(['i', 'ī', 'ĭ'])
                         {
-                            let mut root_text = root.text.to_owned();
+                            let mut root_text = root.text.get().to_owned();
                             root_text.pop();
-                            let ending_tail: String = ending.text.chars().skip(1).collect();
+                            let ending_tail: String = ending.text.get().chars().skip(1).collect();
                             format!("{root_text}ī{ending_tail}")
                         } else {
-                            format!("{}{}", root.text, ending.text)
+                            format!("{}{}", root.text.get(), ending.text.get())
                         };
                         result.push(Analysis {
                             lemma,
@@ -466,6 +514,32 @@ pub fn roman_numeral(text: &str) -> Option<u64> {
 /// Analyze with the default options outside a sentence start.
 pub fn analyze(word: &str) -> Vec<Analysis> {
     Lemmatizer::new().analyze(word, false)
+}
+/// Index of an embedded lemma, or `None` for a lemma constructed elsewhere.
+pub(crate) fn lemma_index(lemma: &Lemma) -> Option<usize> {
+    let size = std::mem::size_of::<Lemma>();
+    let offset = (lemma as *const Lemma as usize).checked_sub(data::LEMMAS.as_ptr() as usize)?;
+    let index = offset / size;
+    (offset % size == 0 && index < data::LEMMAS.len()).then_some(index)
+}
+/// Index of the first lemma (base or extension) whose key is exactly `key`.
+pub(crate) fn lemma_index_by_key(key: &str) -> Option<usize> {
+    let start = data::LEMMAS_BY_KEY.partition_point(|&i| data::LEMMAS[i as usize].key < key);
+    data::LEMMAS_BY_KEY
+        .get(start)
+        .map(|&i| i as usize)
+        .filter(|&i| data::LEMMAS[i].key == key)
+}
+/// Look up an embedded dictionary entry by its exact key, such as `"amo"`
+/// or a homonym like `"uolo2"`. This is a binary search, unlike scanning
+/// [`lemmas`].
+pub fn find_lemma(key: &str, extension: bool) -> Option<&'static Lemma> {
+    let start = data::LEMMAS_BY_KEY.partition_point(|&i| data::LEMMAS[i as usize].key < key);
+    data::LEMMAS_BY_KEY[start..]
+        .iter()
+        .map(|&i| &data::LEMMAS[i as usize])
+        .take_while(|lemma| lemma.key == key)
+        .find(|lemma| lemma.extension == extension)
 }
 /// All embedded dictionary entries, including the optional extension.
 pub fn lemmas() -> &'static [Lemma] {

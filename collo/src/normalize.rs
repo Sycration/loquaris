@@ -1,7 +1,25 @@
 /// Normalize Latin spelling for lookup, ignoring vowel quantities and i/j, u/v distinctions.
 pub fn normalize(input: &str) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(input.len());
     for c in input.chars() {
+        normalize_char(c, &mut out);
+    }
+    out
+}
+/// Append the normalized spelling of one character.
+#[inline]
+pub(crate) fn normalize_char(c: char, out: &mut String) {
+    if c.is_ascii() {
+        match c {
+            'j' => out.push('i'),
+            'J' => out.push('I'),
+            'v' => out.push('u'),
+            'V' => out.push('U'),
+            _ => out.push(c),
+        }
+        return;
+    }
+    {
         match c {
             'ā' | 'ă' | 'á' => out.push('a'),
             'Ā' | 'Ă' | 'Á' => out.push('A'),
@@ -27,5 +45,4 @@ pub fn normalize(input: &str) -> String {
             _ => out.push(c),
         }
     }
-    out
 }

@@ -1,5 +1,7 @@
 #[path = "src/normalize.rs"]
 mod normalize;
+#[path = "src/hash.rs"]
+mod hash;
 use normalize::normalize;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -106,10 +108,49 @@ fn common_vowels(text: &str) -> String {
     }
     result
 }
+/// Open-addressing index from each distinct key of a sorted table to the
+/// position of its first entry.
+fn hash_index<'a>(keys: impl Iterator<Item = &'a str>) -> Vec<u32> {
+    let keys: Vec<_> = keys.collect();
+    let distinct = keys.windows(2).filter(|w| w[0] != w[1]).count() + 1;
+    let len = (distinct * 2).next_power_of_two();
+    let mut table = vec![hash::EMPTY; len];
+    for (i, key) in keys.iter().enumerate() {
+        if i > 0 && keys[i - 1] == *key {
+            continue;
+        }
+        let mut slot = hash::slot(key, len);
+        while table[slot] != hash::EMPTY {
+            slot = (slot + 1) & (len - 1);
+        }
+        table[slot] = i as u32;
+    }
+    table
+}
+/// Strings for the private tables, stored once in a single blob so that table
+/// entries hold offsets rather than pointers needing load-time relocation.
+#[derive(Default)]
+struct Blob {
+    text: String,
+    offsets: HashMap<String, u32>,
+}
+impl Blob {
+    /// `(start, length)` of `s` in the blob, written as a Rust tuple.
+    fn add(&mut self, s: &str) -> String {
+        let start = *self.offsets.entry(s.to_owned()).or_insert_with(|| {
+            let start = self.text.len() as u32;
+            self.text.push_str(s);
+            start
+        });
+        let length = u16::try_from(s.len()).unwrap();
+        format!("{start},{length}")
+    }
+}
 fn main() {
     println!("cargo:rerun-if-changed=data");
     println!("cargo:rerun-if-changed=src/normalize.rs");
     println!("cargo:rerun-if-changed=src/lib.rs");
+    println!("cargo:rerun-if-changed=src/hash.rs");
     let mut vars = HashMap::new();
     let mut groups: Vec<Vec<String>> = Vec::new();
     for line in lines("data/modeles.la") {
@@ -356,15 +397,38 @@ fn main() {
     }
     writeln!(output, "]; ").unwrap();
     stems.sort();
+    let mut blob = Blob::default();
     writeln!(output, "pub static STEMS: &[Stem] = &[").unwrap();
-    for (key, id, num, text) in stems {
+    for (key, id, num, text) in &stems {
+        let lower = text.to_lowercase();
+        let (_, _, model, _, _, extension, _) = &lemmas[*id];
         writeln!(
             output,
-            "Stem {{ key:{key:?}, lemma:{id}, number:{num}, text:{text:?} }},"
+            "Stem {{ key:Text({}), lemma:{id}, model:{}, number:{num}, extension:{extension}, v:{}, ae:{}, oe:{}, text:Text({}) }},",
+            blob.add(key),
+            model_ids[model],
+            lower.matches('v').count(),
+            lower.matches("āe").count() + lower.matches("prăe").count(),
+            lower.matches("ōe").count(),
+            blob.add(text),
         )
         .unwrap();
     }
     writeln!(output, "]; ").unwrap();
+    let index = hash_index(stems.iter().map(|s| s.0.as_str()));
+    writeln!(output, "pub static STEM_INDEX: &[u32] = &{index:?};").unwrap();
+    // Stem indices grouped by lemma, for generation.
+    let mut by_lemma: Vec<u32> = (0..stems.len() as u32).collect();
+    by_lemma.sort_by_key(|&i| (stems[i as usize].1, i));
+    let mut starts = vec![0u32; lemmas.len() + 1];
+    for &i in &by_lemma {
+        starts[stems[i as usize].1 + 1] += 1;
+    }
+    for i in 1..starts.len() {
+        starts[i] += starts[i - 1];
+    }
+    writeln!(output, "pub static STEMS_BY_LEMMA: &[u32] = &{by_lemma:?};").unwrap();
+    writeln!(output, "pub static LEMMA_STEM_STARTS: &[u32] = &{starts:?};").unwrap();
     let mut endings = Vec::new();
     for (name, model) in &models {
         for e in &model.endings {
@@ -379,11 +443,29 @@ fn main() {
     }
     endings.sort();
     writeln!(output, "pub static ENDINGS: &[Ending] = &[").unwrap();
-    for (key, model, stem, morphology, text) in endings {
-        writeln!(output,"Ending {{ key:{key:?}, model:{model}, stem:{stem}, morphology:{morphology}, text:{text:?} }},").unwrap();
+    for (key, model, stem, morphology, text) in &endings {
+        writeln!(output,"Ending {{ key:Text({}), model:{model}, stem:{stem}, morphology:{morphology}, v:{}, text:Text({}) }},", blob.add(key), text.matches('v').count(), blob.add(text)).unwrap();
     }
     writeln!(output, "]; ").unwrap();
-    writeln!(output, "pub static MODEL_NAMES: &[&str] = &{:?};", names).unwrap();
+    let index = hash_index(endings.iter().map(|e| e.0.as_str()));
+    writeln!(output, "pub static ENDING_INDEX: &[u32] = &{index:?};").unwrap();
+    let longest = endings.iter().map(|e| e.0.len()).max().unwrap_or(0);
+    writeln!(output, "pub const LONGEST_ENDING: usize = {longest};").unwrap();
+    // Ending indices grouped by model, for generation.
+    let mut model_starts = vec![0u32; names.len() + 1];
+    let mut by_model: Vec<u32> = (0..endings.len() as u32).collect();
+    by_model.sort_by_key(|&i| (endings[i as usize].1, i));
+    for &i in &by_model {
+        model_starts[endings[i as usize].1 + 1] += 1;
+    }
+    for i in 1..model_starts.len() {
+        model_starts[i] += model_starts[i - 1];
+    }
+    writeln!(output, "pub static ENDINGS_BY_MODEL: &[u32] = &{by_model:?};").unwrap();
+    writeln!(output, "pub static MODEL_ENDING_STARTS: &[u32] = &{model_starts:?};").unwrap();
+    writeln!(output, "pub static TEXT: &str = {:?};", blob.text).unwrap();
+    let lemma_models: Vec<usize> = lemmas.iter().map(|l| model_ids[&l.2]).collect();
+    writeln!(output, "pub static LEMMA_MODELS: &[u16] = &{lemma_models:?};").unwrap();
     irregulars.sort();
     writeln!(output, "pub static IRREGULARS: &[Irregular] = &[").unwrap();
     for (key, lemma, morphology, text) in irregulars {
@@ -420,6 +502,78 @@ fn main() {
         )
         .unwrap();
     }
+    // Tag components derived from each English morphology description, as in
+    // `tagging::analysis_tags`: a verb tag (or zeros), a case number (0 when
+    // none), and plurality.
+    write!(output, "pub static MORPHOLOGY_TAGS: &[([u8;3],u8,bool)] = &[").unwrap();
+    for line in lines("data/morphos.en") {
+        let Some((number, description)) = line.split_once(':') else {
+            break;
+        };
+        if number.parse::<u16>().is_err() {
+            break;
+        }
+        let modes = ["indicative", "subjunctive", "imperative", "infinitive"];
+        let cases = [
+            "nominative",
+            "vocative",
+            "accusative",
+            "genitive",
+            "dative",
+            "ablative",
+        ];
+        let verb = if description.contains(" -u") {
+            "v3 ".to_owned()
+        } else if let Some(index) = modes.iter().position(|m| description.contains(m)) {
+            format!(
+                "v{}{}",
+                index + 1,
+                if description.contains("present") { '1' } else { ' ' }
+            )
+        } else {
+            "\0\0\0".to_owned()
+        };
+        let case = cases
+            .iter()
+            .position(|c| description.contains(c))
+            .map_or(0, |i| i + 1);
+        write!(
+            output,
+            "(*b{verb:?},{case},{}),",
+            description.contains("plural")
+        )
+        .unwrap();
+    }
+    writeln!(output, "];").unwrap();
+    // Part-of-speech bits from lemma notes, in `tagging::PART_NEEDLES` order.
+    write!(output, "pub static LEMMA_PARTS: &[u16] = &[").unwrap();
+    for lemma in &lemmas {
+        let details = &lemma.3;
+        let mut mask = 0u16;
+        for (bit, needles) in [
+            &["adj."][..],
+            &["conj"],
+            &["excl."],
+            &["interj"],
+            &["num."],
+            &["pron."],
+            &["prép"],
+            &["adv"],
+            &[" nom ", "npr."],
+        ]
+        .iter()
+        .enumerate()
+        {
+            if needles.iter().any(|n| details.contains(n)) {
+                mask |= 1 << bit;
+            }
+        }
+        write!(output, "{mask},").unwrap();
+    }
+    writeln!(output, "];").unwrap();
+    let mut by_key: Vec<usize> = (0..lemmas.len()).collect();
+    by_key.sort_by(|&a, &b| lemmas[a].0.cmp(&lemmas[b].0).then(a.cmp(&b)));
+    writeln!(output, "pub static LEMMAS_BY_KEY: &[u32] = &{by_key:?};").unwrap();
     for (file, name) in [
         ("assimilations.la", "ASSIMILATIONS"),
         ("contractions.la", "CONTRACTIONS"),
@@ -474,16 +628,80 @@ fn main() {
         *table.entry(key.to_owned()).or_default() +=
             count.parse::<u64>().expect("invalid tag count");
     }
+    // Tag vocabulary: every three-character tag in the unigram or n-gram
+    // statistics. Index 0 is reserved for the empty tag preceding a sentence
+    // and index `len + 1` for tags absent from the statistics.
+    let mut vocabulary: BTreeSet<String> = counts.keys().cloned().collect();
+    for key in trigrams.keys() {
+        let bytes = key.as_bytes();
+        assert!(
+            (bytes.len() == 7 && bytes[3] == b' ')
+                || (bytes.len() == 11 && bytes[3] == b' ' && bytes[7] == b' '),
+            "unexpected n-gram key {key:?}"
+        );
+        for start in (0..bytes.len()).step_by(4) {
+            vocabulary.insert(key[start..start + 3].to_owned());
+        }
+    }
+    for tag in &vocabulary {
+        assert!(tag.len() == 3 && tag.is_ascii(), "unexpected tag {tag:?}");
+    }
+    let vocabulary: Vec<String> = vocabulary.into_iter().collect();
+    let tag_index = |tag: &str| vocabulary.binary_search_by(|t| t.as_str().cmp(tag)).unwrap() + 1;
+    let size = vocabulary.len() + 2;
+    let mut table = vec![0u32; size * size * size];
+    for (key, &count) in &trigrams {
+        let index = if key.len() == 7 {
+            tag_index(&key[0..3]) * size + tag_index(&key[4..7])
+        } else {
+            (tag_index(&key[0..3]) * size + tag_index(&key[4..7])) * size + tag_index(&key[8..11])
+        };
+        table[index] = u32::try_from(count).expect("trigram count exceeds u32");
+    }
+    let bytes: Vec<u8> = table.iter().flat_map(|n| n.to_le_bytes()).collect();
+    fs::write(
+        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("trigrams.bin"),
+        bytes,
+    )
+    .unwrap();
+    let fractions: Vec<u64> = vocabulary
+        .iter()
+        .map(|tag| {
+            let occurrences = counts.get(tag).copied().unwrap_or(0);
+            if occurrences == 0 {
+                return 1024;
+            }
+            let part = tag.chars().next().unwrap();
+            let total: u64 = counts
+                .iter()
+                .filter(|(key, _)| key.starts_with(part))
+                .map(|(_, n)| *n)
+                .sum();
+            let factor = match part {
+                'a' | 'p' | 'w' => 341,
+                'v' if tag.ends_with('1') => 512,
+                'v' if tag.ends_with(' ') => 256,
+                'n' => 1024,
+                _ => return 1024,
+            };
+            (occurrences * factor / total.max(1)).max(1)
+        })
+        .collect();
+    write!(output, "pub static TAG_VOCABULARY: &[[u8;3]] = &[").unwrap();
+    for tag in &vocabulary {
+        write!(output, "*b{tag:?},").unwrap();
+    }
+    writeln!(output, "];").unwrap();
+    writeln!(output, "pub static TAG_FRACTIONS: &[u64] = &{fractions:?};").unwrap();
     writeln!(
         output,
-        "pub static TAG_COUNTS: &[(&str,u64)] = &{:?};",
-        counts.into_iter().collect::<Vec<_>>()
+        "pub static TRIGRAM_TABLE: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/trigrams.bin\"));"
     )
     .unwrap();
     writeln!(
         output,
-        "pub static TRIGRAM_COUNTS: &[(&str,u64)] = &{:?};",
-        trigrams.into_iter().collect::<Vec<_>>()
+        "pub static TAG_COUNTS: &[(&str,u64)] = &{:?};",
+        counts.into_iter().collect::<Vec<_>>()
     )
     .unwrap();
     let abbreviations = lines("data/abreviations.la");

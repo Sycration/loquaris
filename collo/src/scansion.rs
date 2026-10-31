@@ -1,5 +1,6 @@
 //! Syllabification and metrical analysis of Latin verse.
 use crate::Lemmatizer;
+use std::collections::HashMap;
 
 /// Metrical quantity of a syllable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,10 +67,60 @@ pub struct ScannedLine {
     pub meters: Vec<Meter>,
 }
 fn vowel(c: char) -> bool {
-    "aāăeēĕiīĭoōŏuūŭyȳўæœAEIOUYĀĂĒĔĪĬŌŎŪŬȲЎÆŒ".contains(c)
+    matches!(
+        c,
+        'a' | 'e' | 'i' | 'o' | 'u' | 'y' | 'A' | 'E' | 'I' | 'O' | 'U' | 'Y' | 'æ' | 'œ' | 'Æ' | 'Œ'
+    ) || marked_vowel(c)
 }
 fn marked_vowel(c: char) -> bool {
-    "āăēĕīĭōŏūŭȳўĀĂĒĔĪĬŌŎŪŬȲЎ".contains(c)
+    matches!(
+        c,
+        'ā' | 'ă'
+            | 'ē'
+            | 'ĕ'
+            | 'ī'
+            | 'ĭ'
+            | 'ō'
+            | 'ŏ'
+            | 'ū'
+            | 'ŭ'
+            | 'ȳ'
+            | 'ў'
+            | 'Ā'
+            | 'Ă'
+            | 'Ē'
+            | 'Ĕ'
+            | 'Ī'
+            | 'Ĭ'
+            | 'Ō'
+            | 'Ŏ'
+            | 'Ū'
+            | 'Ŭ'
+            | 'Ȳ'
+            | 'Ў'
+    )
+}
+fn consonant(c: char) -> bool {
+    matches!(
+        c.to_ascii_lowercase(),
+        'b' | 'c'
+            | 'd'
+            | 'f'
+            | 'g'
+            | 'j'
+            | 'k'
+            | 'l'
+            | 'm'
+            | 'n'
+            | 'p'
+            | 'q'
+            | 'r'
+            | 's'
+            | 't'
+            | 'v'
+            | 'x'
+            | 'z'
+    )
 }
 fn can_elide(form: &str) -> bool {
     let chars: Vec<_> = form.chars().collect();
@@ -82,12 +133,11 @@ fn can_elide(form: &str) -> bool {
     form != "ō" && chars.last().is_some_and(|c| marked_vowel(*c))
 }
 fn quantity(c: char) -> Quantity {
-    if "āēīōūȳĀĒĪŌŪȲæœÆŒ".contains(c) {
-        Quantity::Long
-    } else if "ăĕĭŏŭўĂĔĬŎŬЎ".contains(c) {
-        Quantity::Short
-    } else {
-        Quantity::Unknown
+    match c {
+        'ā' | 'ē' | 'ī' | 'ō' | 'ū' | 'ȳ' | 'Ā' | 'Ē' | 'Ī' | 'Ō' | 'Ū' | 'Ȳ' | 'æ' | 'œ' | 'Æ'
+        | 'Œ' => Quantity::Long,
+        'ă' | 'ĕ' | 'ĭ' | 'ŏ' | 'ŭ' | 'ў' | 'Ă' | 'Ĕ' | 'Ĭ' | 'Ŏ' | 'Ŭ' | 'Ў' => Quantity::Short,
+        _ => Quantity::Unknown,
     }
 }
 fn consonantal(chars: &[char], i: usize) -> bool {
@@ -101,7 +151,7 @@ fn consonantal(chars: &[char], i: usize) -> bool {
 }
 fn lengthen_before_consonant(form: &mut String) {
     let mut chars: Vec<_> = form.chars().collect();
-    if chars.len() < 2 || !"bcdfgjklmnpqrstvxzBCDFGJKLMNPQRSTVXZ".contains(*chars.last().unwrap()) {
+    if chars.len() < 2 || !consonant(*chars.last().unwrap()) {
         return;
     }
     let index = chars.len() - 2;
@@ -176,12 +226,22 @@ fn accent_index(
     }
 }
 fn plain_spelling(form: &str) -> String {
-    form.chars()
-        .map(|c| match c {
-            'j' | 'J' | 'v' | 'V' => c.to_string(),
-            _ => crate::normalize(&c.to_string()),
-        })
-        .collect()
+    let mut out = String::with_capacity(form.len());
+    for c in form.chars() {
+        match c {
+            'j' | 'J' | 'v' | 'V' => out.push(c),
+            _ => crate::normalize::normalize_char(c, &mut out),
+        }
+    }
+    out
+}
+/// The single-character lowercase of `c`, if it has one.
+fn lower(c: char) -> Option<char> {
+    let mut lower = c.to_lowercase();
+    match (lower.next(), lower.next()) {
+        (Some(c), None) => Some(c),
+        _ => None,
+    }
 }
 fn syllabify(form: &str, lexical: bool) -> Vec<Syllable> {
     if !lexical && crate::roman_numeral(form).is_some() {
@@ -218,10 +278,15 @@ fn syllabify(form: &str, lexical: bool) -> Vec<Syllable> {
                 end += 1;
             }
             if end < chars.len() && vowel(chars[end]) {
-                let pair = chars[start..=end].iter().collect::<String>().to_lowercase();
-                if ["āe", "ōe", "āu", "ēu"].contains(&pair.as_str())
-                    || (!lexical && ["ae", "oe", "au", "eu"].contains(&pair.as_str()))
-                {
+                let pair = if end == start + 1 {
+                    lower(chars[start]).zip(lower(chars[end]))
+                } else {
+                    None
+                };
+                if pair.is_some_and(|pair| {
+                    matches!(pair, ('ā', 'e') | ('ō', 'e') | ('ā', 'u') | ('ē', 'u'))
+                        || (!lexical && matches!(pair, ('a', 'e') | ('o', 'e') | ('a', 'u') | ('e', 'u')))
+                }) {
                     q = Quantity::Long;
                     end += 1;
                 }
@@ -241,30 +306,23 @@ fn syllabify(form: &str, lexical: bool) -> Vec<Syllable> {
         let (_, end, mut q) = nuclei[index];
         let boundary = if index + 1 < nuclei.len() {
             let next = nuclei[index + 1].0;
-            let consonants: Vec<_> = chars[end..next]
-                .iter()
-                .copied()
-                .filter(|c| !matches!(c, 'h' | 'H' | '\u{0306}'))
-                .collect();
-            let count: usize = consonants
-                .iter()
-                .map(|c| {
-                    if matches!(c, 'x' | 'z' | 'X' | 'Z') {
-                        2
-                    } else {
-                        1
-                    }
-                })
-                .sum::<usize>()
-                .saturating_sub(usize::from(
-                    consonants.len() >= 2
-                        && matches!(consonants[consonants.len() - 2], 'q' | 'Q')
-                        && matches!(consonants[consonants.len() - 1], 'u' | 'U'),
-                ));
+            // Weighted consonant count, number of consonants, and the last two.
+            let (mut weighted, mut consonants, mut last) = (0usize, 0usize, ['\0'; 2]);
+            for &c in &chars[end..next] {
+                if matches!(c, 'h' | 'H' | '\u{0306}') {
+                    continue;
+                }
+                weighted += if matches!(c, 'x' | 'z' | 'X' | 'Z') { 2 } else { 1 };
+                consonants += 1;
+                last = [last[1], c];
+            }
+            let count = weighted.saturating_sub(usize::from(
+                consonants >= 2 && matches!(last[0], 'q' | 'Q') && matches!(last[1], 'u' | 'U'),
+            ));
             if count >= 2 && !lexical {
-                let mute_liquid = consonants.len() == 2
-                    && "bcdfgptBCDFGPT".contains(consonants[0])
-                    && "lrLR".contains(consonants[1]);
+                let mute_liquid = consonants == 2
+                    && matches!(last[0], 'b' | 'c' | 'd' | 'f' | 'g' | 'p' | 't' | 'B' | 'C' | 'D' | 'F' | 'G' | 'P' | 'T')
+                    && matches!(last[1], 'l' | 'r' | 'L' | 'R');
                 q = if mute_liquid && q != Quantity::Long {
                     Quantity::Unknown
                 } else {
@@ -301,8 +359,26 @@ fn matches_meter(words: &[ScannedWord], meter: Meter) -> bool {
         return false;
     }
     let variable_feet = if meter == Meter::Hexameter { 5 } else { 2 };
+    let readings: Vec<Vec<Vec<Quantity>>> = words
+        .iter()
+        .map(|word| {
+            word.alternatives
+                .iter()
+                .map(|alternative| {
+                    alternative
+                        .iter()
+                        .filter(|s| !s.elided)
+                        .map(|s| s.quantity)
+                        .collect()
+                })
+                .collect()
+        })
+        .collect();
+    let mut pattern = Vec::with_capacity(20);
+    let mut positions = Vec::new();
+    let mut next = Vec::new();
     for choices in 0..(1 << variable_feet) {
-        let mut pattern = Vec::new();
+        pattern.clear();
         for foot in 0..variable_feet {
             pattern.push(Quantity::Long);
             if choices & (1 << foot) == 0 {
@@ -325,18 +401,18 @@ fn matches_meter(words: &[ScannedWord], meter: Meter) -> bool {
                 Quantity::Unknown,
             ]);
         }
-        let mut positions = vec![0];
-        for word in words {
-            let mut next = Vec::new();
+        positions.clear();
+        positions.push(0);
+        for word in &readings {
+            next.clear();
             for &position in &positions {
-                for alternative in &word.alternatives {
-                    let length = alternative.iter().filter(|s| !s.elided).count();
+                for alternative in word {
+                    let length = alternative.len();
                     if position + length <= pattern.len()
                         && alternative
                             .iter()
-                            .filter(|s| !s.elided)
                             .zip(&pattern[position..])
-                            .all(|(syllable, &expected)| fits(syllable.quantity, expected))
+                            .all(|(&quantity, &expected)| fits(quantity, expected))
                     {
                         next.push(position + length);
                     }
@@ -344,7 +420,7 @@ fn matches_meter(words: &[ScannedWord], meter: Meter) -> bool {
             }
             next.sort_unstable();
             next.dedup();
-            positions = next;
+            std::mem::swap(&mut positions, &mut next);
             if positions.is_empty() {
                 break;
             }
@@ -370,11 +446,18 @@ impl Lemmatizer {
         options: ScansionOptions,
     ) -> ScannedWord {
         let analyses = self.analyze(word, sentence_start);
+        let attached: Vec<String> = analyses
+            .iter()
+            .map(|analysis| attach_suffix(&analysis.form, &analysis.suffix))
+            .collect();
         let mut forms = std::collections::BTreeMap::<String, u64>::new();
-        for analysis in &analyses {
-            *forms
-                .entry(attach_suffix(&analysis.form, &analysis.suffix))
-                .or_default() += crate::tagging::analysis_weight(analysis);
+        for (analysis, form) in analyses.iter().zip(&attached) {
+            match forms.get_mut(form) {
+                Some(weight) => *weight += crate::tagging::analysis_weight(analysis),
+                None => {
+                    forms.insert(form.clone(), crate::tagging::analysis_weight(analysis));
+                }
+            }
         }
         let best = forms
             .iter()
@@ -417,21 +500,18 @@ impl Lemmatizer {
                 }
             }
         }
-        let mut accent_weights = std::collections::BTreeMap::<
-            (String, Option<usize>),
-            (u64, String, Vec<Syllable>),
-        >::new();
-        for (candidate, weight) in &forms {
-            let enclitic = analyses.iter().any(|analysis| {
-                !analysis.suffix.is_empty()
-                    && analysis.suffix != "st"
-                    && attach_suffix(&analysis.form, &analysis.suffix) == *candidate
+        // Weight and first contributing form index per (spelling, accent).
+        // `alternatives[i]` is the lexical syllabification of the i-th form.
+        let mut accent_weights =
+            std::collections::BTreeMap::<(String, Option<usize>), (u64, usize)>::new();
+        for (index, (candidate, weight)) in forms.iter().enumerate() {
+            let enclitic = analyses.iter().zip(&attached).any(|(analysis, form)| {
+                !analysis.suffix.is_empty() && analysis.suffix != "st" && form == candidate
             });
-            let candidate_syllables = syllabify(candidate, true);
-            let accent = accent_index(&candidate_syllables, enclitic, word, options);
+            let accent = accent_index(&alternatives[index], enclitic, word, options);
             let entry = accent_weights
                 .entry((plain_spelling(candidate), accent))
-                .or_insert_with(|| (0, candidate.clone(), candidate_syllables));
+                .or_insert((0, index));
             entry.0 += weight;
         }
         let chosen_accent =
@@ -441,7 +521,11 @@ impl Lemmatizer {
                     left_value.0.cmp(&right_value.0).then(left.cmp(right))
                 });
         let (accent, mut accent_form, mut accent_syllables) = match chosen_accent {
-            Some(((_, accent), (_, form, syllables))) => (accent, form, syllables),
+            Some(((_, accent), (_, index))) => (
+                accent,
+                alternative_forms[index].clone(),
+                alternatives[index].clone(),
+            ),
             None => (None, form.clone(), syllables.clone()),
         };
         if word.chars().next().is_some_and(char::is_uppercase) {
@@ -479,6 +563,16 @@ impl Lemmatizer {
     }
     /// Scan a line with explicit accentuation options.
     pub fn scan_line_with_options(&self, line: &str, options: ScansionOptions) -> ScannedLine {
+        self.scan_line_cached(line, options, &mut HashMap::new())
+    }
+    /// Scan a line, reusing word scans from earlier lines of the same text.
+    /// A word's scan depends only on its text, sentence position, and options.
+    fn scan_line_cached<'a>(
+        &self,
+        line: &'a str,
+        options: ScansionOptions,
+        cache: &mut HashMap<(&'a str, bool), ScannedWord>,
+    ) -> ScannedLine {
         let mut words = Vec::new();
         let mut start = None;
         let mut previous_end = 0;
@@ -495,11 +589,15 @@ impl Lemmatizer {
             } else if let Some(begin) = start.take() {
                 let sentence_start = words.is_empty()
                     || line[previous_end..begin].contains(['.', '?', '!', ';', ':']);
-                words.push(self.scan_word_with_options(
-                    &line[begin..offset],
-                    sentence_start,
-                    options,
-                ));
+                let word = &line[begin..offset];
+                words.push(
+                    cache
+                        .entry((word, sentence_start))
+                        .or_insert_with(|| {
+                            self.scan_word_with_options(word, sentence_start, options)
+                        })
+                        .clone(),
+                );
                 previous_end = offset;
             }
         }
@@ -507,7 +605,7 @@ impl Lemmatizer {
             let next_chars: Vec<_> = words[i + 1].form.chars().collect();
             let next_is_numeral = crate::roman_numeral(&words[i + 1].text).is_some();
             let next_consonant = next_chars.first().is_some_and(|c| {
-                "bcdfgjklmnpqrstvxzBCDFGJKLMNPQRSTVXZ".contains(*c)
+                consonant(*c)
                     || (!next_is_numeral && consonantal(&next_chars, 0))
             });
             if next_consonant {
@@ -584,12 +682,13 @@ impl Lemmatizer {
     }
     /// Scan each line of a text independently.
     pub fn scan_text(&self, text: &str) -> Vec<ScannedLine> {
-        text.lines().map(|line| self.scan_line(line)).collect()
+        self.scan_text_with_options(text, ScansionOptions::default())
     }
     /// Scan each line with explicit accentuation options.
     pub fn scan_text_with_options(&self, text: &str, options: ScansionOptions) -> Vec<ScannedLine> {
+        let mut cache = HashMap::new();
         text.lines()
-            .map(|line| self.scan_line_with_options(line, options))
+            .map(|line| self.scan_line_cached(line, options, &mut cache))
             .collect()
     }
 }
