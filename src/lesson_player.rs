@@ -2,13 +2,13 @@
 use std::{
     io::Cursor,
     num::{NonZeroU16, NonZeroU32},
+    sync::Arc,
 };
 
 use crate::{Lesson, project::AudioGaps};
-use base64::{Engine, engine::general_purpose::STANDARD};
 
 struct Plan {
-    clips: Vec<rodio::Decoder<Cursor<Vec<u8>>>>,
+    clips: Vec<rodio::Decoder<Cursor<Arc<[u8]>>>>,
     gaps_ms: Vec<u32>,
     missing: Option<usize>,
 }
@@ -24,11 +24,8 @@ impl Plan {
                 missing = Some(index);
                 break;
             };
-            let data = STANDARD
-                .decode(clip)
-                .map_err(|e| format!("Entry {} has invalid audio: {e}", index + 1))?;
-            let decoder =
-                crate::audio::wav_decoder(data).map_err(|e| format!("Entry {}: {e}", index + 1))?;
+            let decoder = crate::audio::wav_decoder(clip.clone())
+                .map_err(|e| format!("Entry {}: {e}", index + 1))?;
             if !clips.is_empty() {
                 gaps_ms
                     .push(gaps.between(lesson.entries[index - 1].participant, entry.participant));
@@ -135,7 +132,7 @@ mod tests {
     use super::*;
     use crate::{Entry, Language, Participant};
 
-    fn clip() -> String {
+    fn clip() -> Arc<[u8]> {
         let mut wav = Cursor::new(Vec::new());
         let mut writer = hound::WavWriter::new(
             &mut wav,
@@ -151,7 +148,7 @@ mod tests {
             writer.write_sample(1000i16).unwrap();
         }
         writer.finalize().unwrap();
-        STANDARD.encode(wav.into_inner())
+        wav.into_inner().into()
     }
 
     fn lesson() -> Lesson {
@@ -207,7 +204,7 @@ mod tests {
                 .len(),
             1
         );
-        lesson.entries[1].audio = Some("invalid".into());
+        lesson.entries[1].audio = Some(b"invalid".as_slice().into());
         assert!(Plan::new(&lesson, 1, AudioGaps::default()).is_err());
     }
 

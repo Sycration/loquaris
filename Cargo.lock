@@ -2418,7 +2418,6 @@ dependencies = [
 name = "loquaris"
 version = "0.1.0"
 dependencies = [
- "base64",
  "collo",
  "cosmic_undo_2",
  "cpal",

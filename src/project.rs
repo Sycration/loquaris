@@ -1,8 +1,6 @@
 //! Versioned rkyv project persistence.
 use std::{io::Write, path::Path};
 
-use base64::{Engine, engine::general_purpose::STANDARD};
-
 use crate::{Language, Lesson, Participant};
 
 const MAGIC: &[u8; 8] = b"LOQUARIS";
@@ -229,22 +227,9 @@ impl Project {
 
     fn to_disk(&self) -> Result<DiskProject, String> {
         let mut lessons = Vec::with_capacity(self.lessons.len());
-        for (li, lesson) in self.lessons.iter().enumerate() {
+        for lesson in self.lessons.iter() {
             let mut entries = Vec::with_capacity(lesson.entries.len());
-            for (ei, entry) in lesson.entries.iter().enumerate() {
-                let audio = entry
-                    .audio
-                    .as_ref()
-                    .map(|audio| {
-                        STANDARD.decode(audio).map_err(|error| {
-                            format!(
-                                "Lesson {}, entry {} has invalid audio: {error}",
-                                li + 1,
-                                ei + 1
-                            )
-                        })
-                    })
-                    .transpose()?;
+            for entry in lesson.entries.iter() {
                 entries.push(DiskEntry {
                     participant: match entry.participant {
                         Participant::Teacher => 0,
@@ -255,7 +240,7 @@ impl Project {
                         Language::Latin => 1,
                     },
                     text: entry.text.clone(),
-                    audio,
+                    audio: entry.audio.as_deref().map(<[u8]>::to_vec),
                 });
             }
             lessons.push(DiskLesson {
@@ -315,7 +300,7 @@ impl Project {
                     participant,
                     language,
                     text: entry.text,
-                    audio: entry.audio.map(|bytes| STANDARD.encode(bytes)),
+                    audio: entry.audio.map(Into::into),
                 });
             }
             lessons.push(Lesson {
@@ -398,12 +383,11 @@ mod tests {
         let path = dir.path().join("project.loqr");
         let mut project = example();
         let audio = vec![0x85; 8192];
-        project.lessons[0].entries[0].audio = Some(STANDARD.encode(&audio));
+        project.lessons[0].entries[0].audio = Some(audio.clone().into());
         project.save(&path).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.starts_with(MAGIC));
         assert!(bytes.windows(audio.len()).any(|window| window == audio));
-        assert!(bytes.len() < STANDARD.encode(&audio).len());
         assert_eq!(Project::load(&path).unwrap(), project);
         let mut changed = project.clone();
         changed.name = "Changed".into();
@@ -484,18 +468,6 @@ mod tests {
         assert!(Project::load(&path).is_err());
         std::fs::write(&path, "not a project").unwrap();
         assert!(Project::load(&path).is_err());
-    }
-
-    #[test]
-    fn invalid_audio_does_not_overwrite_archive() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("course.loqr");
-        let valid = example();
-        valid.save(&path).unwrap();
-        let mut invalid = valid.clone();
-        invalid.lessons[0].entries[0].audio = Some("not base64!".into());
-        assert!(invalid.save(&path).unwrap_err().contains("invalid audio"));
-        assert_eq!(Project::load(&path).unwrap(), valid);
     }
 
     #[test]

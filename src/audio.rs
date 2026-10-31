@@ -1,5 +1,4 @@
-//! Entry audio is stored as base64-encoded WAV in the project file.
-use base64::{Engine, engine::general_purpose::STANDARD};
+//! Entry audio is stored as WAV bytes, both in memory and in the project file.
 use cpal::traits::{DeviceTrait, StreamTrait};
 use eframe::egui;
 use std::{
@@ -19,7 +18,7 @@ pub struct Editor {
     inputs: Vec<crate::audio_devices::Input>,
     selected: usize,
     recording: Option<Recording>,
-    clip: Option<String>,
+    clip: Option<Arc<[u8]>>,
     error: Option<String>,
     playback: Option<(rodio::MixerDeviceSink, rodio::Player)>,
     position: f64,
@@ -55,13 +54,12 @@ struct Recording {
 
 pub struct Outcome {
     pub closed: bool,
-    pub changed: Option<Option<String>>,
+    pub changed: Option<Option<Arc<[u8]>>>,
     pub actions: Vec<crate::keybinds::Action>,
 }
 
-pub(crate) fn clip_duration(clip: &str) -> Result<f64, String> {
-    let data = STANDARD.decode(clip).map_err(|e| e.to_string())?;
-    let reader = hound::WavReader::new(Cursor::new(data)).map_err(|e| e.to_string())?;
+pub(crate) fn clip_duration(clip: &[u8]) -> Result<f64, String> {
+    let reader = hound::WavReader::new(Cursor::new(clip)).map_err(|e| e.to_string())?;
     let rate = reader.spec().sample_rate;
     if rate == 0 || reader.spec().channels == 0 {
         return Err("Invalid WAV format".into());
@@ -69,8 +67,11 @@ pub(crate) fn clip_duration(clip: &str) -> Result<f64, String> {
     Ok(reader.duration() as f64 / rate as f64)
 }
 
-pub(crate) fn wav_decoder(data: Vec<u8>) -> Result<rodio::Decoder<Cursor<Vec<u8>>>, String> {
-    let header = hound::WavReader::new(Cursor::new(&data))
+pub(crate) fn wav_decoder<T>(data: T) -> Result<rodio::Decoder<Cursor<T>>, String>
+where
+    T: AsRef<[u8]> + Send + Sync + 'static,
+{
+    let header = hound::WavReader::new(Cursor::new(data.as_ref()))
         .map_err(|e| format!("Could not decode audio: {e}"))?;
     if header.spec().channels == 0 || header.spec().sample_rate == 0 {
         return Err("Could not decode audio: invalid WAV channel count or sample rate.".into());
@@ -119,7 +120,7 @@ fn high_pass_recording(samples: &mut [i16], sample_rate: u32, channels: u16) {
     }
 }
 
-fn encode_recording(samples: &mut [i16], spec: hound::WavSpec) -> Result<String, String> {
+fn encode_recording(samples: &mut [i16], spec: hound::WavSpec) -> Result<Arc<[u8]>, String> {
     high_pass_recording(samples, spec.sample_rate, spec.channels);
     fade_recording(samples, spec.sample_rate, spec.channels);
     let mut output = Cursor::new(Vec::new());
@@ -130,10 +131,10 @@ fn encode_recording(samples: &mut [i16], spec: hound::WavSpec) -> Result<String,
         }
         writer.finalize().map_err(|e| e.to_string())?;
     }
-    Ok(STANDARD.encode(output.into_inner()))
+    Ok(output.into_inner().into())
 }
 
-fn import_wav(bytes: Vec<u8>) -> Result<String, String> {
+fn import_wav(bytes: Vec<u8>) -> Result<Arc<[u8]>, String> {
     let mut reader =
         hound::WavReader::new(Cursor::new(&bytes)).map_err(|e| format!("Invalid WAV: {e}"))?;
     let spec = reader.spec();
@@ -149,7 +150,7 @@ fn import_wav(bytes: Vec<u8>) -> Result<String, String> {
             sample.map_err(|e| e.to_string())?;
         }
     }
-    Ok(STANDARD.encode(bytes))
+    Ok(bytes.into())
 }
 
 fn time_label(seconds: f64) -> String {
@@ -215,7 +216,7 @@ impl Editor {
     }
 
     #[cfg(test)]
-    pub(crate) fn clip_for_test(&self) -> Option<&str> {
+    pub(crate) fn clip_for_test(&self) -> Option<&[u8]> {
         self.clip.as_deref()
     }
 
@@ -453,10 +454,7 @@ impl Editor {
 
     fn play(&mut self) -> Result<(), String> {
         self.playback = None;
-        let data = STANDARD
-            .decode(self.clip.as_ref().ok_or("No clip attached")?)
-            .map_err(|e| format!("Invalid audio data: {e}"))?;
-        let source = wav_decoder(data)?;
+        let source = wav_decoder(self.clip.clone().ok_or("No clip attached")?)?;
         let mut stream = rodio::DeviceSinkBuilder::open_default_sink()
             .map_err(|e| format!("Could not open output device: {e}"))?;
         stream.log_on_drop(false);
@@ -510,7 +508,7 @@ impl Editor {
     fn handle_action(
         &mut self,
         action: crate::keybinds::Action,
-        changed: &mut Option<Option<String>>,
+        changed: &mut Option<Option<Arc<[u8]>>>,
         project_actions: &mut Vec<crate::keybinds::Action>,
     ) {
         use crate::keybinds::Action;
@@ -887,9 +885,7 @@ mod tests {
         }
         let imported_bytes = input.into_inner();
         assert_eq!(
-            STANDARD
-                .decode(import_wav(imported_bytes.clone()).unwrap())
-                .unwrap(),
+            &*import_wav(imported_bytes.clone()).unwrap(),
             imported_bytes
         );
 
@@ -897,8 +893,7 @@ mod tests {
         high_pass_recording(&mut expected, spec.sample_rate, spec.channels);
         fade_recording(&mut expected, spec.sample_rate, spec.channels);
         let encoded = encode_recording(&mut original.clone(), spec).unwrap();
-        let data = STANDARD.decode(encoded).unwrap();
-        let reader = hound::WavReader::new(Cursor::new(data)).unwrap();
+        let reader = hound::WavReader::new(Cursor::new(encoded)).unwrap();
         let samples = reader
             .into_samples::<i16>()
             .collect::<Result<Vec<_>, _>>()
@@ -984,7 +979,7 @@ mod tests {
             participant: crate::Participant::Teacher,
             language: crate::Language::Latin,
             text: "salvē".into(),
-            audio: Some("clip".into()),
+            audio: Some(b"clip".as_slice().into()),
         };
         let mut editor = Editor::for_test((0, 0), entry);
         editor.duration = 12.0;
@@ -1078,12 +1073,9 @@ mod tests {
             }
             writer.finalize().unwrap();
         }
-        assert_eq!(
-            clip_duration(&STANDARD.encode(wav.into_inner())).unwrap(),
-            2.0
-        );
+        assert_eq!(clip_duration(&wav.into_inner()).unwrap(), 2.0);
         assert_eq!(time_label(83.9), "01:23");
-        assert!(clip_duration("not base64!").is_err());
+        assert!(clip_duration(b"not a WAV").is_err());
     }
 
     #[test]

@@ -94,7 +94,8 @@ struct Entry {
     participant: Participant,
     language: Language,
     text: String,
-    audio: Option<String>,
+    /// WAV bytes; shared cheaply across undo history snapshots.
+    audio: Option<std::sync::Arc<[u8]>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -157,8 +158,8 @@ enum Command {
     SetAudio {
         lesson: usize,
         index: usize,
-        before: Option<String>,
-        after: Option<String>,
+        before: Option<std::sync::Arc<[u8]>>,
+        after: Option<std::sync::Arc<[u8]>>,
     },
     EditText {
         target: TextTarget,
@@ -3171,8 +3172,7 @@ fn card(
 mod tests {
     use super::*;
 
-    fn test_wav(frames: usize, rate: u32) -> String {
-        use base64::Engine;
+    fn test_wav(frames: usize, rate: u32) -> std::sync::Arc<[u8]> {
         let mut output = std::io::Cursor::new(Vec::new());
         {
             let mut writer = hound::WavWriter::new(
@@ -3190,7 +3190,7 @@ mod tests {
             }
             writer.finalize().unwrap();
         }
-        base64::engine::general_purpose::STANDARD.encode(output.into_inner())
+        output.into_inner().into()
     }
 
     #[test]
@@ -3240,7 +3240,7 @@ mod tests {
             ),
             "00:04.2"
         );
-        lesson.entries[1].audio = Some("invalid".into());
+        lesson.entries[1].audio = Some(b"invalid".as_slice().into());
         assert_eq!(
             lesson_recording_summary(&lesson, project::AudioGaps::default()),
             "Recordings incomplete"
@@ -3525,7 +3525,7 @@ mod tests {
             lesson: 0,
             index: 1,
             before: None,
-            after: Some("UklGRg==".into()),
+            after: Some(b"RIFF".as_slice().into()),
         };
         app.apply_command(command.clone(), true);
         app.history.push(command);
@@ -3537,16 +3537,25 @@ mod tests {
             project::Project::load(&path).unwrap().lessons[0].entries[1]
                 .audio
                 .as_deref(),
-            Some("UklGRg==")
+            Some(b"RIFF".as_slice())
         );
         app.undo();
         assert!(app.lessons[0].entries[1].audio.is_none());
         app.redo();
-        assert_eq!(app.lessons[0].entries[1].audio.as_deref(), Some("UklGRg=="));
+        assert_eq!(
+            app.lessons[0].entries[1].audio.as_deref(),
+            Some(b"RIFF".as_slice())
+        );
         app.entry_action(0, 1, EntryAction::MoveDown);
-        assert_eq!(app.lessons[0].entries[2].audio.as_deref(), Some("UklGRg=="));
+        assert_eq!(
+            app.lessons[0].entries[2].audio.as_deref(),
+            Some(b"RIFF".as_slice())
+        );
         app.undo();
-        assert_eq!(app.lessons[0].entries[1].audio.as_deref(), Some("UklGRg=="));
+        assert_eq!(
+            app.lessons[0].entries[1].audio.as_deref(),
+            Some(b"RIFF".as_slice())
+        );
     }
 
     #[test]
@@ -3559,7 +3568,7 @@ mod tests {
             audio: None,
         };
         assert!(audio_marker_rect(rect, &entry).is_none());
-        entry.audio = Some("clip".into());
+        entry.audio = Some(b"clip".as_slice().into());
         let teacher = audio_marker_rect(rect, &entry).unwrap();
         assert!(teacher.left() > rect.right());
         assert_eq!(teacher.width(), 4.0);
@@ -3589,7 +3598,7 @@ mod tests {
                 participant,
                 language: Language::Latin,
                 text: String::new(),
-                audio: Some("clip".into()),
+                audio: Some(b"clip".as_slice().into()),
             };
             let marker = audio_marker_rect(rect, &entry).unwrap();
             if participant == Participant::Teacher {
@@ -3611,13 +3620,13 @@ mod tests {
             lesson: 0,
             index: 1,
             before: None,
-            after: Some("UklGRg==".into()),
+            after: Some(b"RIFF".as_slice().into()),
         };
         app.apply_command(command.clone(), true);
         app.history.push(command);
         assert_eq!(
             app.audio_editor.as_ref().unwrap().clip_for_test(),
-            Some("UklGRg==")
+            Some(b"RIFF".as_slice())
         );
         app.undo();
         assert_eq!(app.audio_editor.as_ref().unwrap().clip_for_test(), None);
@@ -3625,7 +3634,7 @@ mod tests {
         app.redo();
         assert_eq!(
             app.audio_editor.as_ref().unwrap().clip_for_test(),
-            Some("UklGRg==")
+            Some(b"RIFF".as_slice())
         );
     }
 

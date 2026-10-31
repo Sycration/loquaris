@@ -1,8 +1,6 @@
 //! Combine recorded entries into a 48 kHz, stereo, 16-bit WAV.
 use std::{io::Cursor, path::Path};
 
-use base64::{Engine, engine::general_purpose::STANDARD};
-
 use crate::{Lesson, Participant};
 
 const RATE: u32 = 48_000;
@@ -113,9 +111,7 @@ pub fn save(
         for lesson in lessons {
             for (index, entry) in lesson.entries.iter().enumerate() {
                 let result = (|| -> Result<(), String> {
-                    let data = STANDARD
-                        .decode(entry.audio.as_ref().ok_or("Missing recording")?)
-                        .map_err(|e| e.to_string())?;
+                    let data = entry.audio.as_deref().ok_or("Missing recording")?;
                     let mut reader =
                         hound::WavReader::new(Cursor::new(data)).map_err(|e| e.to_string())?;
                     let spec = reader.spec();
@@ -216,7 +212,7 @@ mod tests {
     use super::*;
     use crate::{Entry, Language};
 
-    fn clip(rate: u32, channels: u16, value: i16) -> String {
+    fn clip(rate: u32, channels: u16, value: i16) -> std::sync::Arc<[u8]> {
         let mut data = Cursor::new(Vec::new());
         let spec = hound::WavSpec {
             channels,
@@ -229,7 +225,7 @@ mod tests {
             writer.write_sample(value).unwrap();
         }
         writer.finalize().unwrap();
-        STANDARD.encode(data.into_inner())
+        data.into_inner().into()
     }
 
     fn lessons() -> Vec<Lesson> {
@@ -318,7 +314,7 @@ mod tests {
             )
             .is_err()
         );
-        lessons[0].entries[1].audio = Some("invalid".into());
+        lessons[0].entries[1].audio = Some(b"invalid".as_slice().into());
         assert!(
             save(
                 &path,
