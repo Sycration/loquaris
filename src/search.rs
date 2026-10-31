@@ -40,6 +40,8 @@ pub struct Search {
     ruled_out: Vec<usize>,
     /// Read unmarked vowels as short when a reading allows it.
     unmarked_short: bool,
+    /// Match the query as text even when it is a single Latin word.
+    exact_text: bool,
     /// Results with the content generation they were computed for.
     results: Option<(u64, Arc<[Hit]>)>,
 }
@@ -52,6 +54,7 @@ impl Default for Search {
             analysis: Vec::new(),
             ruled_out: Vec::new(),
             unmarked_short: false,
+            exact_text: false,
             results: None,
         }
     }
@@ -62,6 +65,7 @@ impl Search {
     pub fn with_options_of(other: &Search) -> Self {
         Self {
             unmarked_short: other.unmarked_short,
+            exact_text: other.exact_text,
             ..Self::default()
         }
     }
@@ -78,8 +82,26 @@ impl Search {
         }
     }
 
+    pub fn exact_text(&self) -> bool {
+        self.exact_text
+    }
+
+    /// Choose whether to match the query as text rather than by lemma.
+    pub fn set_exact_text(&mut self, exact_text: bool) {
+        if self.exact_text != exact_text {
+            self.exact_text = exact_text;
+            self.results = None;
+        }
+    }
+
+    /// How the query is matched: as text if that option is set, else by the
+    /// chosen lemma when the query is one Latin word.
     pub fn mode(&self) -> SearchMode {
-        self.mode
+        if self.exact_text {
+            SearchMode::Text
+        } else {
+            self.mode
+        }
     }
 
     /// Collo's analyses of each word of the query that fit its written
@@ -122,12 +144,15 @@ impl Search {
     /// Search for a lemma, showing its headword as the query.
     pub fn search_lemma(&mut self, lemma: &'static collo::Lemma) {
         self.set_query(lemma.headword.to_owned());
-        self.set_mode(SearchMode::Lemma(lemma));
+        self.choose_lemma(lemma);
     }
 
-    pub fn set_mode(&mut self, mode: SearchMode) {
-        if self.mode != mode {
+    /// Search the query's word by this lemma, turning off exact text.
+    pub fn choose_lemma(&mut self, lemma: &'static collo::Lemma) {
+        let mode = SearchMode::Lemma(lemma);
+        if self.mode != mode || self.exact_text {
             self.mode = mode;
+            self.exact_text = false;
             self.results = None;
         }
     }
@@ -138,7 +163,7 @@ impl Search {
             let hits = if self.is_empty() {
                 Vec::new()
             } else {
-                match self.mode {
+                match self.mode() {
                     SearchMode::Text => text_hits(lessons, &self.query),
                     SearchMode::Lemma(lemma) => lemma_hits(index, lemma, self.unmarked_short),
                 }
@@ -358,8 +383,16 @@ mod tests {
         );
         assert_eq!(counts_per_lesson(&lessons, &hits), [[1, 0], [0, 1]]);
 
-        search.set_mode(SearchMode::Text);
+        search.set_exact_text(true);
+        assert_eq!(search.mode(), SearchMode::Text);
         assert!(search.hits(&lessons, &index, 0).is_empty());
+        // The option sticks for new queries until a lemma is chosen.
+        search.set_query("puella".into());
+        assert_eq!(search.mode(), SearchMode::Text);
+        assert!(Search::with_options_of(&search).exact_text());
+        search.choose_lemma(lemma);
+        assert!(!search.exact_text());
+        assert_eq!(search.hits(&lessons, &index, 0).len(), 2);
     }
 
     #[test]
@@ -370,12 +403,12 @@ mod tests {
         let mut search = Search::default();
         let check = |search: &mut Search, query: &str, key: &str, ruled_out, found: &[&str]| {
             search.set_query(query.into());
-            search.set_mode(SearchMode::Lemma(
+            search.choose_lemma(
                 collo::lemmas()
                     .iter()
                     .find(|lemma| lemma.key == key && !lemma.extension)
                     .expect("a lemma"),
-            ));
+            );
             assert_eq!(search.ruled_out(), [ruled_out], "{query}");
             let hits = search.hits(&lessons, &index, 0);
             let found_text: Vec<_> = hits.iter().map(|hit| &text[hit.range.clone()]).collect();
@@ -439,8 +472,8 @@ mod tests {
         let mut lessons = lessons(&[&[(Participant::Teacher, Language::L1, "a cat")]]);
         let index = WordIndex::default();
         let mut search = Search::default();
+        search.set_exact_text(true);
         search.set_query("cat".into());
-        search.set_mode(SearchMode::Text);
         assert_eq!(search.hits(&lessons, &index, 1).len(), 1);
         lessons[0].entries[0].text = "a dog".into();
         assert_eq!(search.hits(&lessons, &index, 1).len(), 1, "cached");

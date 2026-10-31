@@ -25,7 +25,7 @@ const MUTED: Color32 = Color32::from_gray(150);
 /// colour-vision deficiency and contrast against `SURFACE`.
 const TEACHER_SERIES: Color32 = Color32::from_rgb(0x39, 0x87, 0xe5);
 const STUDENT_SERIES: Color32 = Color32::from_rgb(0xd9, 0x59, 0x26);
-const CHART_HEIGHT: f32 = 110.0;
+const CHART_HEIGHT: f32 = 140.0;
 
 fn section_heading(ui: &mut egui::Ui, title: &str) {
     ui.add_space(14.0);
@@ -105,6 +105,17 @@ impl App {
                 self.search.set_query(String::new());
             }
         });
+        let mut exact_text = self.search.exact_text();
+        if ui
+            .checkbox(&mut exact_text, "Exact text")
+            .on_hover_text(
+                "Search for this spelling in every entry, Latin or not, instead \
+                 of every form of a word's lemma",
+            )
+            .changed()
+        {
+            self.search.set_exact_text(exact_text);
+        }
         let mut unmarked_short = self.search.unmarked_short();
         if ui
             .checkbox(&mut unmarked_short, "Unmarked vowels are short")
@@ -214,7 +225,7 @@ impl App {
                         .on_hover_text("Search every form of this lemma")
                         .clicked()
                     {
-                        chosen = Some(SearchMode::Lemma(lemma));
+                        chosen = Some(lemma);
                     }
                 } else {
                     ui.label(heading);
@@ -244,16 +255,8 @@ impl App {
                 }
             }
         }
-        if single_word
-            && ui
-                .selectable_label(mode == SearchMode::Text, "Exact text instead")
-                .on_hover_text("Search for this spelling in every entry, Latin or not")
-                .clicked()
-        {
-            chosen = Some(SearchMode::Text);
-        }
-        if let Some(mode) = chosen {
-            self.search.set_mode(mode);
+        if let Some(lemma) = chosen {
+            self.search.choose_lemma(lemma);
         }
     }
 
@@ -285,7 +288,7 @@ impl App {
         }
     }
 
-    /// A stacked bar per lesson: uses by the teacher and by the student.
+    /// Per lesson, the teacher's uses above a middle line and the student's below.
     fn uses_chart_section(&mut self, ui: &mut egui::Ui, hits: &[Hit], current: usize) {
         section_heading(ui, "Uses per lesson");
         if self.search.is_empty() || self.lessons.is_empty() {
@@ -364,14 +367,16 @@ fn highlighted(text: &str, ranges: &[Range<usize>], width: f32) -> LayoutJob {
     job
 }
 
-/// Draw the stacked bars, returning a lesson whose bar was clicked.
+/// Draw teacher uses as bars rising from a middle baseline and student uses
+/// as bars hanging below it, returning a lesson whose column was clicked.
 fn uses_chart(
     ui: &mut egui::Ui,
     lessons: &[Lesson],
     counts: &[[usize; 2]],
     current: usize,
 ) -> Option<usize> {
-    let max = counts.iter().map(|[t, s]| t + s).max().unwrap_or(0);
+    // Both halves share one scale so their bars compare directly.
+    let max = counts.iter().flatten().copied().max().unwrap_or(0);
     let axis_width = 26.0;
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), CHART_HEIGHT + 18.0),
@@ -382,80 +387,89 @@ fn uses_chart(
         egui::pos2(rect.left() + axis_width, rect.top() + 6.0),
         egui::pos2(rect.right(), rect.top() + 6.0 + CHART_HEIGHT),
     );
+    let baseline = plot.center().y.round();
+    // Bars stop a surface gap short of the baseline on either side.
+    let gap = 2.0;
+    let half = baseline - plot.top() - gap;
     let small = egui::FontId::proportional(11.0);
-    painter.text(
-        egui::pos2(plot.left() - 6.0, plot.top()),
-        egui::Align2::RIGHT_CENTER,
-        max.to_string(),
-        small.clone(),
-        MUTED,
-    );
-    painter.text(
-        egui::pos2(plot.left() - 6.0, plot.bottom()),
-        egui::Align2::RIGHT_CENTER,
-        "0",
-        small.clone(),
-        MUTED,
-    );
-    painter.line_segment(
-        [plot.left_bottom(), plot.right_bottom()],
-        Stroke::new(1.0, Color32::from_gray(80)),
-    );
+    for (y, text) in [
+        (plot.top(), max.to_string()),
+        (baseline, "0".to_owned()),
+        (plot.bottom(), max.to_string()),
+    ] {
+        painter.text(
+            egui::pos2(plot.left() - 6.0, y),
+            egui::Align2::RIGHT_CENTER,
+            text,
+            small.clone(),
+            MUTED,
+        );
+    }
 
     let count = lessons.len().max(1) as f32;
     let slot = plot.width() / count;
-    let gap = if slot >= 6.0 { 2.0 } else { 0.0 };
-    let bar_width = (slot - gap).max(1.0);
+    let bar_gap = if slot >= 6.0 { 2.0 } else { 0.0 };
+    let bar_width = (slot - bar_gap).max(1.0);
     let hovered = response
         .hover_pos()
         .filter(|pos| pos.x >= plot.left())
         .map(|pos| (((pos.x - plot.left()) / slot) as usize).min(lessons.len() - 1));
     for (lesson, &[teacher, student]) in counts.iter().enumerate() {
         let left = plot.left() + lesson as f32 * slot;
-        let column = egui::Rect::from_min_max(
-            egui::pos2(left, plot.top()),
-            egui::pos2(left + bar_width, plot.bottom()),
-        );
         if lesson == current || hovered == Some(lesson) {
             let shade = if lesson == current { 40 } else { 28 };
+            let column = egui::Rect::from_min_max(
+                egui::pos2(left, plot.top()),
+                egui::pos2(left + bar_width, plot.bottom()),
+            );
             painter.rect_filled(column, 0.0, Color32::from_gray(shade));
         }
         if max == 0 {
             continue;
         }
-        let scale = plot.height() / max as f32;
-        let mut bottom = plot.bottom();
-        let segments = [(teacher, TEACHER_SERIES), (student, STUDENT_SERIES)];
-        let top_segment = segments.iter().rposition(|(n, _)| *n > 0);
-        for (index, &(n, color)) in segments.iter().enumerate() {
+        let scale = half / max as f32;
+        for (n, color, up) in [
+            (teacher, TEACHER_SERIES, true),
+            (student, STUDENT_SERIES, false),
+        ] {
             if n == 0 {
                 continue;
             }
             let height = n as f32 * scale;
-            let top = bottom - height;
-            let radius = if Some(index) == top_segment {
-                (4.0_f32).min(bar_width / 2.0).min(height) as u8
-            } else {
-                0
-            };
-            let segment = egui::Rect::from_min_max(
-                egui::pos2(left, top),
-                egui::pos2(left + bar_width, bottom),
-            );
-            painter.rect_filled(
-                segment,
-                CornerRadius {
+            let radius = (4.0_f32).min(bar_width / 2.0).min(height) as u8;
+            let (top, bottom, corners) = if up {
+                let bottom = baseline - gap;
+                let corners = CornerRadius {
                     nw: radius,
                     ne: radius,
                     sw: 0,
                     se: 0,
-                },
-                color,
+                };
+                (bottom - height, bottom, corners)
+            } else {
+                let top = baseline + gap;
+                let corners = CornerRadius {
+                    nw: 0,
+                    ne: 0,
+                    sw: radius,
+                    se: radius,
+                };
+                (top, top + height, corners)
+            };
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(left, top),
+                egui::pos2(left + bar_width, bottom),
             );
-            // A surface gap separates stacked segments.
-            bottom = top - if gap > 0.0 { 2.0 } else { 0.0 };
+            painter.rect_filled(bar, corners, color);
         }
     }
+    painter.line_segment(
+        [
+            egui::pos2(plot.left(), baseline),
+            egui::pos2(plot.right(), baseline),
+        ],
+        Stroke::new(1.0, Color32::from_gray(80)),
+    );
     let label_y = plot.bottom() + 9.0;
     painter.text(
         egui::pos2(plot.left(), label_y),

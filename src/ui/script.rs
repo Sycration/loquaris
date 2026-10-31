@@ -164,6 +164,7 @@ impl App {
         self.focus_name == Some(lesson)
             || self.scroll_to_lesson == Some(lesson)
             || in_lesson(self.scroll_to_entry)
+            || in_lesson(self.centre_entry.map(|(position, _)| position))
             || in_lesson(self.focus_entry)
             || in_lesson(self.editing_entry)
     }
@@ -172,6 +173,9 @@ impl App {
         self.focus_entry == Some(position)
             || self.editing_entry == Some(position)
             || self.scroll_to_entry == Some(position)
+            || self
+                .centre_entry
+                .is_some_and(|(target, _)| target == position)
     }
 
     fn lessons_view(
@@ -211,6 +215,10 @@ impl App {
         self.focus_entry = None;
         self.scroll_to_entry = None;
         self.focus_name = None;
+        // Give up on centring after a while, e.g. if the entry is gone.
+        self.centre_entry = self
+            .centre_entry
+            .and_then(|(position, frames)| Some((position, frames.checked_sub(1)?)));
         self.scroll_to_lesson = None;
     }
 
@@ -429,6 +437,26 @@ impl App {
         }
         if focus || self.scroll_to_entry == Some(position) {
             response.text.scroll_to_me(None);
+        }
+        if self
+            .centre_entry
+            .is_some_and(|(target, _)| target == position)
+        {
+            self.centre(ui, response.bounds, frame.viewport);
+        }
+    }
+
+    /// Aim the scroll at the middle of the viewport for the entry in `bounds`,
+    /// until it gets there or the user scrolls or clicks.
+    fn centre(&mut self, ui: &egui::Ui, bounds: egui::Rect, viewport: egui::Rect) {
+        let interrupted = ui
+            .input(|input| input.smooth_scroll_delta != Vec2::ZERO || input.pointer.any_pressed());
+        let offset = bounds.center().y - viewport.center().y;
+        if interrupted || offset.abs() < 1.0 {
+            self.centre_entry = None;
+        } else {
+            ui.scroll_to_rect(bounds, Some(egui::Align::Center));
+            ui.ctx().request_repaint();
         }
     }
 

@@ -56,6 +56,10 @@ pub struct App {
     pub scrollbar_offset: Option<f32>,
     pub focus_entry: Option<Position>,
     pub scroll_to_entry: Option<Position>,
+    /// An entry to bring to the middle of the script, with how many more
+    /// frames to keep trying. Rows measured on the way change the layout, so
+    /// the scroll is re-aimed until the entry is centred.
+    pub centre_entry: Option<(Position, u8)>,
     pub selected_entry: Option<Position>,
     pub extra_selected: std::collections::BTreeSet<Position>,
     pub selection_anchor: Option<Position>,
@@ -109,6 +113,7 @@ impl Default for App {
             scrollbar_offset: None,
             focus_entry: None,
             scroll_to_entry: None,
+            centre_entry: None,
             selected_entry: None,
             extra_selected: std::collections::BTreeSet::new(),
             selection_anchor: None,

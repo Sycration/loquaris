@@ -1261,7 +1261,10 @@ fn side_panel_searches_lemmas_and_follows_edits() {
 
     app.reveal_entry((0, 5));
     assert_eq!(app.selection(), [(0, 5)]);
-    assert_eq!(app.scroll_to_entry, Some((0, 5)));
+    assert!(
+        app.centre_entry
+            .is_some_and(|(position, _)| position == (0, 5))
+    );
     render(&mut app, &ctx);
 }
 
@@ -1405,4 +1408,109 @@ fn dragging_or_double_clicking_entry_text_searches_the_selection() {
         step(&mut app, Vec::new());
     }
     assert_eq!(app.search.query, "manus");
+}
+
+#[test]
+fn going_to_an_entry_centres_it_in_the_script() {
+    let mut app = sample_app();
+    let entries = (0..60)
+        .map(|n| Entry {
+            audio: None,
+            participant: Participant::Teacher,
+            language: Language::L1,
+            text: format!("Line {n}"),
+        })
+        .collect();
+    app.lessons[0].entries = entries;
+    let ctx = egui::Context::default();
+    configure_fonts(&ctx);
+    // Advance time so the scroll animation finishes.
+    let mut time = 0.0;
+    let mut frames = |app: &mut App, count: usize| {
+        for _ in 0..count {
+            time += 0.1;
+            let mut frame = eframe::Frame::_new_kittest();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1200.0, 750.0),
+                )),
+                time: Some(time),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| eframe::App::ui(app, ui, &mut frame));
+            output.textures_delta.clear();
+        }
+    };
+    frames(&mut app, 3);
+    app.reveal_entry((0, 30));
+    frames(&mut app, 20);
+    let rect = app
+        .entry_text_rects
+        .iter()
+        .find(|(position, _)| *position == (0, 30))
+        .expect("the entry is drawn")
+        .1;
+    // Entries off screen aren't drawn, so the first drawn one isn't the first.
+    assert!(app.entry_text_rects[0].0.1 > 10, "the script scrolled");
+    assert!(
+        (rect.center().y - 375.0).abs() < 80.0,
+        "entry centred, not at an edge: {rect:?}"
+    );
+}
+
+#[test]
+#[ignore = "uses the generated large project fixture"]
+fn going_to_an_entry_in_the_large_project() {
+    let path = std::path::Path::new("/tmp/opencode/loquaris-word-index-500x1000.loqr");
+    let project = project::Project::load(path).unwrap();
+    let mut app = App::default();
+    app.replace_project(project, None);
+    for lesson in &mut app.lessons[..3] {
+        lesson.expanded = true;
+    }
+    let ctx = egui::Context::default();
+    configure_fonts(&ctx);
+    let mut time = 0.0;
+    let mut frames = |app: &mut App, count: usize| {
+        for _ in 0..count {
+            time += 1.0 / 60.0;
+            let mut frame = eframe::Frame::_new_kittest();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1200.0, 750.0),
+                )),
+                time: Some(time),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| eframe::App::ui(app, ui, &mut frame));
+            output.textures_delta.clear();
+        }
+    };
+    let centre = |app: &App, target| {
+        app.entry_text_rects
+            .iter()
+            .find(|(position, _)| *position == target)
+            .map(|(_, rect)| rect.center().y)
+    };
+    frames(&mut app, 3);
+    // Far jumps cross rows whose heights are only estimated until drawn.
+    for target in [(0, 700), (2, 300), (0, 20), (1, 999), (2, 900)] {
+        app.reveal_entry(target);
+        let mut frames_taken = 0;
+        while app.centre_entry.is_some() {
+            frames(&mut app, 1);
+            frames_taken += 1;
+        }
+        let centre = centre(&app, target).expect("the entry is on screen");
+        eprintln!("{target:?}: centred at {centre} after {frames_taken} frames");
+        assert!(frames_taken < 100, "centring settles");
+        // The script viewport spans y = 122.5 to 675, centred at 398.75; the
+        // text sits a little below the middle of its card.
+        assert!(
+            (centre - 399.0).abs() < 30.0,
+            "{target:?} centred: {centre}"
+        );
+    }
 }

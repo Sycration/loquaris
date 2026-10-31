@@ -164,14 +164,15 @@ impl App {
         self.scroll_to_entry = Some(target);
     }
 
-    /// Select one entry and scroll the script to it.
+    /// Select one entry and scroll the script to put it in the middle.
     pub fn reveal_entry(&mut self, target: Position) {
         self.select_only(target);
         self.editing_entry = None;
         self.focus_entry = None;
         self.active_lesson = target.0;
         self.lessons[target.0].expanded = true;
-        self.scroll_to_entry = Some(target);
+        self.scroll_to_entry = None;
+        self.centre_entry = Some((target, 120));
     }
 
     /// Start editing the primary selection.
