@@ -1,74 +1,80 @@
 # collo
 
-A Latin morphological analyzer using the bundled Collatinus lexicon. The build
-script resolves inflection models and embeds sorted native Rust tables; no data
-files are read at runtime.
+A Latin morphological analyzer: a Rust port of
+[Collatinus](https://github.com/biblissima/collatinus). Given a Latin word, it
+finds every lemma and inflection it could be. It can also tag running text,
+mark vowel lengths and accents, scan verse, and inflect lemmas.
+
+The Collatinus lexicon is compiled into the library at build time, so nothing
+is read from disk at runtime.
 
 ```rust
 use collo::Lemmatizer;
 
 let analyzer = Lemmatizer::new();
 for analysis in analyzer.analyze("puellae", false) {
-    println!("{}: {}", analysis.lemma.headword,
-        analysis.morphology("en").unwrap_or("unknown"));
+    println!(
+        "{}{} — {}: {}",
+        analysis.form,
+        analysis.suffix,
+        analysis.lemma.headword,
+        analysis.morphology("en").unwrap_or("?"),
+    );
 }
 ```
 
-Results include all matching analyses, not contextual disambiguation. Set
-`include_extension` to include the optional extension lexicon. The boolean
-argument to `analyze` indicates sentence-initial capitalization. Lookup ignores
-vowel quantity and i/j and u/v distinctions, and tries common assimilations,
-contractions, and enclitics. Original grammatical notes and translations are
-available on each lemma. Reconstructed spellings may reflect an expanded or
-assimilated variant rather than the exact input spelling. Use `inflect` to
-generate forms for a lemma, and `analyze_token` or `roman_numeral` to interpret
-Roman numerals.
+To try it from the command line, run this from the `loquaris` directory:
 
-`tag_text` selects contextual tags using the bundled LASLA unigram and trigram
-counts. `scan_word`, `scan_line`, and `scan_text` return syllables, quantities,
-accents, elisions, and candidate dactylic meters. Scansion retains alternative
-syllabifications; where alternatives of the same length disagree on a quantity,
-the corresponding syllable is marked unknown. `ScansionOptions` controls the
-accent on an ambiguous penult and the original's optional `-ius` rule. The
-best-ranked accent reading and its syllables are exposed separately from the
-best-ranked scansion reading.
+```sh
+cargo run --release --example collo -- "Arma virumque cano"
+```
 
-These structured APIs do not reproduce the original application's HTML output.
-Scansion, orthographic variant handling, and contextual tagging have not been
-fully validated for parity with the original, especially uncommon prosodic and
-orthographic cases. The bundled Collatinus data carries LGPL notices in the data
-files.
+## What it does
 
-## Comparison with the original
+**Analysis.** `Lemmatizer::analyze(word, sentence_start)` returns every
+possible reading of a word. Each reading has a lemma, a morphology ID, and the
+word's spelling with vowel lengths marked. Set `sentence_start` when the word
+begins a sentence, so a capitalized word can also be read as an ordinary
+lowercase word.
+- Lookup ignores vowel length, and treats i/j and u/v as the same letter.
+- It also tries common assimilations and contractions, and splits off enclitics
+  such as *-que*.
+- The spelling it returns may differ a little from the input, e.g. a
+  contraction written out in full.
+- `morphology(id, "en")` describes a morphology ID in English, French (`"fr"`)
+  or Spanish (`"es"`).
 
-With Qt 5 development files, `moc`, a C++ compiler, Python 3, and Cargo installed,
-run `python3 tools/compare.py`. This compiles the original C++ lemmatizer and
-compares it to the Rust library on the unique words in `texts/`. The script reads
-the texts without modifying them, strips navigation markup and numbering, handles
-their mixed encodings, and excludes Roman numerals because the two APIs expose
-them differently. It writes per-word differences to
-`/tmp/opencode/collo-comparison/differences.tsv`.
+**Lemmas.** Each `Lemma` has its headword, its translations, its frequency, and
+the dictionary's grammatical notes. `lemmas()` lists all of them, and
+`Lemmatizer::inflect` generates every form of one. An extra, less common
+lexicon is available if you set `include_extension` on the `Lemmatizer`.
 
-By default, comparison is limited to exact sets of lemma keys and morphology
-IDs, with the base lexicon and sentence-initial case handling disabled. Use
-`--forms` to include quantified spellings and enclitics, `--sentence-start` to
-enable sentence-initial case handling for every test word, or `--extension` to
-include the extension lexicon. These are word-level comparisons, not tests of
-contextual tagging or scansion.
+**Tagging.** `tag_text` picks the most likely reading of each word from its
+context, using word frequencies from the LASLA corpus. `tag_text_with` does the
+same with your own function supplying each word's readings.
 
-Run `python3 tools/compare_context.py` to compare contextual tags and per-word
-quantity patterns on the text lines. Add `--sentences` to join wrapped lines and
-compare complete sentences. Quantity comparisons exclude unknown words and
-cases where the original reports an indeterminate syllable count; token-alignment
-failures are reported separately. The original's HTML tag output shifts labels
-when it encounters an analyzable word with no tag; those sequences are reported
-and excluded rather than counted as valid reference tags. The harness also
-restarts the C++ process and reports inputs that hang or crash, with a configurable
-`--reference-timeout`. Run `python3 tools/compare_accents.py` to compare six
-accentuation modes on an evenly spaced sample of the corpus vocabulary; pass
-`--limit 0` to test all unique words. `python3 tools/compare_meters.py` compares
-whole-line classifications on the poetry against the original foot search. It
-separately reports source hexameter misses and source pentameters that violate
-the conventional two-dactyl second half, which Rust does not classify as
-pentameters. These corpus comparisons do not exhaust every possible meter.
-All four scripts accept `--output` and `--limit`.
+**Scansion.** `scan_word`, `scan_line` and `scan_text` split words into
+syllables and give their quantities, accents and elisions, along with the
+dactylic meters a line could be.
+- When there are several possible readings, all of them are kept.
+- A syllable is marked unknown when the readings disagree about its length.
+- `ScansionOptions` sets how an ambiguous penult is accented, and whether
+  Collatinus's rule for words in *-ius* applies.
+
+**Roman numerals.** `analyze_token` and `roman_numeral` read Roman numerals.
+
+## Accuracy
+
+collo returns structured data. It doesn't produce the original application's
+HTML output.
+
+Word analysis has been checked against the original C++ code on the texts in
+`texts/`. Scansion, spelling variants and tagging haven't been fully checked,
+especially in uncommon cases. [COMPARISON.md](COMPARISON.md) explains how to
+run the comparisons.
+
+## License
+
+GPL, version 3 or later. collo is based on Collatinus, which is licensed under
+GPL version 2 or later. Some of the bundled Collatinus data files carry LGPL
+notices.
