@@ -37,7 +37,7 @@ word's spelling with vowel lengths marked. Set `sentence_start` when the word
 begins a sentence, so a capitalized word can also be read as an ordinary
 lowercase word.
 - Lookup ignores vowel length, and treats i/j and u/v as the same letter.
-- It also tries common assimilations and contractions, and splits off enclitics
+- Lookup also covers common assimilations and contractions, and splits off enclitics
   such as *-que*.
 - The spelling it returns may differ a little from the input, e.g. a
   contraction written out in full.
@@ -49,7 +49,7 @@ the dictionary's grammatical notes. `lemmas()` lists all of them, and
 `Lemmatizer::inflect` generates every form of one. An extra, less common
 lexicon is available if you set `include_extension` on the `Lemmatizer`.
 
-**Tagging.** `tag_text` picks the most likely reading of each word from its
+**Tagging.** `tag_text` selects the most likely reading of each word from its
 context, using word frequencies from the LASLA corpus. `tag_text_with` does the
 same with your own function supplying each word's readings.
 
@@ -57,7 +57,7 @@ same with your own function supplying each word's readings.
 syllables and give their quantities, accents and elisions, along with the
 dactylic meters a line could be.
 - When there are several possible readings, all of them are kept.
-- A syllable is marked unknown when the readings disagree about its length.
+- A syllable is marked unknown when the readings give it different lengths.
 - `ScansionOptions` sets how an ambiguous penult is accented, and whether
   Collatinus's rule for words in *-ius* applies.
 

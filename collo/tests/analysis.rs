@@ -367,3 +367,45 @@ fn reference_contractions_and_suffix_inheritance() {
             .any(|a| a.lemma.key == "Graius" && a.form == "Grājīs")
     );
 }
+
+/// Lexicon entries corrected against Lewis & Short, where collo differs
+/// from Collatinus by design. Each word was unreachable as its own lemma.
+#[test]
+fn corrected_lexicon_entries_parse_as_their_own_words() {
+    let lemmas =
+        |word: &str| -> Vec<&'static str> { analyze(word).iter().map(|a| a.lemma.key).collect() };
+    for (word, key) in [
+        ("virgulta", "uirgulta"),
+        ("virgultorum", "uirgulta"),
+        ("fomenta", "fomentum"),
+        ("habiliter", "habiliter"),
+        ("Lingones", "Lingones"),
+        ("Lingonum", "Lingones"),
+        ("cito", "cito"),
+        ("citius", "cito"),
+        ("citissime", "cito"),
+        ("molo", "molo"),
+        ("molis", "molo"),
+        ("molui", "molo"),
+    ] {
+        assert!(lemmas(word).contains(&key), "{word}: {:?}", lemmas(word));
+    }
+    // The old entries' accidental spellings are gone.
+    for word in ["virgulum", "fomenum", "habiriter", "moleo"] {
+        assert!(analyze(word).is_empty(), "{word}");
+    }
+    assert!(!lemmas("Ligones").contains(&"Lingones"));
+    // Only the 3rd conjugation exists, so no 1st conjugation forms of "grind".
+    assert!(!lemmas("molavi").contains(&"molo"));
+    assert!(lemmas("fomenta").iter().all(|key| *key == "fomentum"));
+}
+
+#[test]
+fn cito_is_tagged_as_the_adverb_in_context() {
+    let analyzer = Lemmatizer::new();
+    let tagged = analyzer.tag_text("Puella cito currit.");
+    let cito = tagged.iter().find(|word| word.text == "cito").unwrap();
+    let selected = &cito.analyses[cito.selected.unwrap()];
+    assert_eq!(selected.lemma.key, "cito");
+    assert!(selected.form.ends_with('ŏ'), "{}", selected.form);
+}

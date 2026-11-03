@@ -1,6 +1,6 @@
 //! Application state and the operations that change it.
 //!
-//! Rendering lives in [`crate::ui`]; this module owns the state, the undoable
+//! Rendering lives in [`crate::ui`]; this module contains the state, the undoable
 //! command history, selection, and project file handling.
 mod editing;
 mod files;
@@ -57,7 +57,7 @@ pub struct App {
     pub focus_entry: Option<Position>,
     pub scroll_to_entry: Option<Position>,
     /// An entry to bring to the middle of the script, with how many more
-    /// frames to keep trying. Rows measured on the way change the layout, so
+    /// frames remain for the attempt. Rows measured on the way change the layout, so
     /// the scroll is re-aimed until the entry is centred.
     pub centre_entry: Option<(Position, u8)>,
     pub selected_entry: Option<Position>,

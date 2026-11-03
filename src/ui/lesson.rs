@@ -12,7 +12,7 @@ pub struct HeaderResponse {
 pub struct HeaderOptions<'a> {
     pub width: f32,
     pub focus: bool,
-    /// The copy pinned to the top of the viewport, which needs its own ids.
+    /// The copy pinned to the top of the viewport, which has separate ids.
     pub sticky: bool,
     pub recording_summary: &'a str,
     /// `Some(true)` while playing, `Some(false)` while paused.

@@ -4,7 +4,7 @@ use std::{io::Write, path::Path};
 use crate::{Language, Lesson, Participant};
 
 const MAGIC: &[u8; 8] = b"LOQUARIS";
-const ARCHIVE_VERSION: u32 = 3;
+const ARCHIVE_VERSION: u32 = 4;
 const HEADER_SIZE: usize = 16;
 
 // This schema is fixed for archive version 1. rkyv is configured for little
@@ -32,6 +32,24 @@ struct DiskProjectV3 {
     same_participant_ms: u32,
     different_participant_ms: u32,
     word_cache: crate::word_index::PersistedCache,
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct DiskProjectV4 {
+    project: DiskProject,
+    same_participant_ms: u32,
+    different_participant_ms: u32,
+    word_cache: crate::word_index::PersistedCache,
+    /// Only the cropped entries.
+    trims: Vec<DiskTrim>,
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct DiskTrim {
+    lesson: u32,
+    entry: u32,
+    start: u32,
+    end: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,12 +214,13 @@ impl Project {
         }
         let mut aligned = rkyv::util::AlignedVec::<16>::new();
         aligned.extend_from_slice(&bytes[HEADER_SIZE..]);
-        let (disk, gaps, word_cache) = match version {
+        let (disk, gaps, word_cache, trims) = match version {
             1 => (
                 rkyv::from_bytes::<DiskProject, rkyv::rancor::Error>(&aligned)
                     .map_err(|error| format!("Invalid project archive: {error}"))?,
                 AudioGaps::default(),
                 crate::word_index::PersistedCache::default(),
+                Vec::new(),
             ),
             2 => {
                 let disk = rkyv::from_bytes::<DiskProjectV2, rkyv::rancor::Error>(&aligned)
@@ -213,6 +232,7 @@ impl Project {
                         different_participant_ms: disk.different_participant_ms,
                     },
                     crate::word_index::PersistedCache::default(),
+                    Vec::new(),
                 )
             }
             3 => {
@@ -225,23 +245,50 @@ impl Project {
                         different_participant_ms: disk.different_participant_ms,
                     },
                     disk.word_cache,
+                    Vec::new(),
+                )
+            }
+            4 => {
+                let disk = rkyv::from_bytes::<DiskProjectV4, rkyv::rancor::Error>(&aligned)
+                    .map_err(|error| format!("Invalid project archive: {error}"))?;
+                (
+                    disk.project,
+                    AudioGaps {
+                        same_participant_ms: disk.same_participant_ms,
+                        different_participant_ms: disk.different_participant_ms,
+                    },
+                    disk.word_cache,
+                    disk.trims,
                 )
             }
             _ => unreachable!(),
         };
         let mut project = Self::from_disk(disk, word_cache)?;
         project.audio_gaps = gaps;
+        for trim in trims {
+            let entry = project
+                .lessons
+                .get_mut(trim.lesson as usize)
+                .and_then(|lesson| lesson.entries.get_mut(trim.entry as usize))
+                .filter(|_| trim.start < trim.end)
+                .ok_or("Invalid audio crop in project archive.")?;
+            entry.trim = Some(crate::Trim {
+                start: trim.start,
+                end: trim.end,
+            });
+        }
         project.validate()?;
         Ok(project)
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
         self.validate()?;
-        let disk = DiskProjectV3 {
+        let disk = DiskProjectV4 {
             project: self.to_disk()?,
             same_participant_ms: self.audio_gaps.same_participant_ms,
             different_participant_ms: self.audio_gaps.different_participant_ms,
             word_cache: self.word_cache.clone(),
+            trims: self.disk_trims(),
         };
         let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&disk)
             .map_err(|error| format!("Could not serialize project: {error}"))?;
@@ -260,6 +307,23 @@ impl Project {
         file.persist(path)
             .map_err(|error| format!("Could not save {}: {}", path.display(), error.error))?;
         Ok(())
+    }
+
+    fn disk_trims(&self) -> Vec<DiskTrim> {
+        let mut trims = Vec::new();
+        for (lesson_index, lesson) in self.lessons.iter().enumerate() {
+            for (entry_index, entry) in lesson.entries.iter().enumerate() {
+                if let Some(trim) = entry.trim {
+                    trims.push(DiskTrim {
+                        lesson: lesson_index as u32,
+                        entry: entry_index as u32,
+                        start: trim.start,
+                        end: trim.end,
+                    });
+                }
+            }
+        }
+        trims
     }
 
     fn to_disk(&self) -> Result<DiskProject, String> {
@@ -341,6 +405,7 @@ impl Project {
                     language,
                     text: entry.text,
                     audio: entry.audio.map(Into::into),
+                    trim: None,
                 });
             }
             lessons.push(Lesson {
@@ -376,12 +441,14 @@ mod tests {
                     entries: vec![
                         Entry {
                             audio: None,
+                            trim: None,
                             participant: Participant::Teacher,
                             language: Language::L1,
                             text: "A \"hand\"\nwith a newline".into(),
                         },
                         Entry {
                             audio: None,
+                            trim: None,
                             participant: Participant::Student,
                             language: Language::Latin,
                             text: "duae manūs".into(),
@@ -416,6 +483,38 @@ mod tests {
             ensure_extension(Path::new("course.LOQR")),
             ("course.LOQR".into(), false)
         );
+    }
+
+    #[test]
+    fn audio_crops_round_trip_and_invalid_ones_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crop.loqr");
+        let mut project = example();
+        project.lessons[0].entries[1].trim = Some(crate::Trim { start: 5, end: 90 });
+        project.save(&path).unwrap();
+        assert_eq!(Project::load(&path).unwrap(), project);
+
+        for (entry, start, end) in [(9, 5, 90), (1, 90, 5)] {
+            let disk = DiskProjectV4 {
+                project: project.to_disk().unwrap(),
+                same_participant_ms: 100,
+                different_participant_ms: 500,
+                word_cache: crate::word_index::PersistedCache::default(),
+                trims: vec![DiskTrim {
+                    lesson: 0,
+                    entry,
+                    start,
+                    end,
+                }],
+            };
+            let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&disk).unwrap();
+            let mut bytes = MAGIC.to_vec();
+            bytes.extend_from_slice(&ARCHIVE_VERSION.to_le_bytes());
+            bytes.extend_from_slice(&[0; 4]);
+            bytes.extend_from_slice(&archive);
+            std::fs::write(&path, bytes).unwrap();
+            assert!(Project::load(&path).is_err());
+        }
     }
 
     #[test]

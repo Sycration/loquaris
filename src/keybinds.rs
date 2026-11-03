@@ -537,7 +537,7 @@ impl Registry {
                     }
                     return false;
                 }
-                // The application owns undo history; do not let egui's independent
+                // Undo history is implemented in the application; do not let egui's independent
                 // text-field undo history act on old default shortcuts after rebinding.
                 if (*key == Key::Z || *key == Key::Y)
                     && modifiers.matches_logically(Modifiers::COMMAND)
@@ -1034,7 +1034,7 @@ mod tests {
     }
 
     #[test]
-    fn history_only_dispatch_respects_custom_bindings() {
+    fn history_only_dispatch_uses_custom_bindings() {
         let mut registry = Registry::default();
         let undo = registry
             .bindings

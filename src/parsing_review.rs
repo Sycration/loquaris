@@ -1,4 +1,4 @@
-//! A contextual parsing chooser. Collo exposes one preferred analysis, not a ranking.
+//! A contextual parsing chooser. Collo outputs one contextually selected analysis, not a ranking.
 use eframe::egui::{self, RichText};
 
 use crate::macronize;
@@ -103,7 +103,7 @@ impl Review {
         egui::Modal::new(egui::Id::unique("parsing_review")).show(ctx, |ui| {
             ui.set_width(width);
             ui.heading("Review Latin parsings");
-            ui.label("Collo's contextual choice is marked; other readings are not ranked.");
+            ui.label("The reading selected from context is marked; other readings are not ranked.");
             ui.add_space(8.0);
             ui.label("Choose a word:");
             egui::ScrollArea::vertical().id_salt("review_words").max_height(70.0).show(ui, |ui| {
@@ -131,17 +131,17 @@ impl Review {
                             let analysis = &word.analyses[candidate];
                             let spelling = macronize::analysis_word(&word.text, analysis, true);
                             let description = analysis.morphology("en").unwrap_or("unknown morphology");
-                            let preferred = if word.selected == Some(candidate) { " · collo's choice" } else { "" };
+                            let preferred = if word.selected == Some(candidate) { " · selected from context" } else { "" };
                             let mut label = egui::text::LayoutJob::default();
                             let latin = egui::TextFormat { font_id: crate::ui::entry_font(crate::Language::Latin, 15.0), color: ui.visuals().text_color(), ..Default::default() };
                             let default = egui::TextFormat { font_id: egui::FontId::proportional(15.0), color: ui.visuals().text_color(), ..Default::default() };
                             label.append(spelling.as_deref().unwrap_or("Spelling cannot be aligned"), 0.0, if spelling.is_some() { latin.clone() } else { default.clone() });
                             label.append(" — ", 0.0, default.clone());
-                            label.append(analysis.lemma.headword, 0.0, latin);
+                            label.append(&macronize::reader_form(analysis.lemma.headword), 0.0, latin);
                             label.append(&format!(" · {description}{preferred}"), 0.0, default);
                             let response = ui.add_enabled(spelling.is_some(), egui::Button::selectable(self.choices[index] == Some(candidate), label).wrap());
                             if response.clicked() { self.choices[index] = Some(candidate); }
-                            if spelling.is_none() { response.on_hover_text("Collo reconstructed a different spelling; this reading cannot be applied safely."); }
+                            if spelling.is_none() { response.on_hover_text("This reading has a different spelling, so it cannot be applied safely."); }
                         }
                     });
                 }

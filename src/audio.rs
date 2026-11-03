@@ -1,6 +1,7 @@
 //! Entry audio is stored as WAV bytes, both in memory and in the project file.
 use cpal::traits::{DeviceTrait, StreamTrait};
 use eframe::egui;
+use rodio::Source as _;
 use std::{
     io::Cursor,
     sync::{
@@ -23,6 +24,10 @@ pub struct Editor {
     playback: Option<(rodio::MixerDeviceSink, rodio::Player)>,
     position: f64,
     duration: f64,
+    trim: Option<crate::Trim>,
+    frames: u32,
+    rate: u32,
+    peaks: Option<crate::waveform::Peaks>,
     diagnostics: Vec<String>,
     last_capture: Option<CaptureSnapshot>,
 }
@@ -50,11 +55,14 @@ struct Recording {
     spec: hound::WavSpec,
     stats: Arc<CaptureStats>,
     started: Instant,
+    peaks: crate::waveform::Peaks,
+    /// How many captured samples `peaks` already covers.
+    peaked_samples: usize,
 }
 
 pub struct Outcome {
     pub closed: bool,
-    pub changed: Option<Option<Arc<[u8]>>>,
+    pub changed: Option<crate::AudioState>,
     pub actions: Vec<crate::keybinds::Action>,
 }
 
@@ -77,6 +85,152 @@ where
         return Err("Could not decode audio: invalid WAV channel count or sample rate.".into());
     }
     rodio::Decoder::try_from(Cursor::new(data)).map_err(|e| format!("Could not decode audio: {e}"))
+}
+
+/// The frames of a clip inside a crop. A crop that does not fit the clip is
+/// clamped to it. A non-empty clip always has at least one selected frame.
+pub(crate) fn selected_frames(trim: Option<crate::Trim>, total: u32) -> std::ops::Range<u32> {
+    let Some(trim) = trim else {
+        return 0..total;
+    };
+    let start = trim.start.min(total.saturating_sub(1));
+    start..trim.end.max(start.saturating_add(1)).min(total)
+}
+
+pub(crate) fn selected_duration(clip: &[u8], trim: Option<crate::Trim>) -> Result<f64, String> {
+    let reader = hound::WavReader::new(Cursor::new(clip)).map_err(|e| e.to_string())?;
+    let rate = reader.spec().sample_rate;
+    if rate == 0 || reader.spec().channels == 0 {
+        return Err("Invalid WAV format".into());
+    }
+    let selected = selected_frames(trim, reader.duration());
+    Ok(f64::from(selected.end - selected.start) / f64::from(rate))
+}
+
+/// Gain at `frame` that keeps a crop from clicking: a 10 ms ramp on each edge
+/// that cuts into the clip. Edges at the clip's own ends are left untouched.
+pub(crate) fn cut_gain(frame: u32, selected: &std::ops::Range<u32>, total: u32, rate: u32) -> f32 {
+    let fade = (rate / 100).max(1);
+    let mut distance = fade;
+    if selected.start > 0 {
+        distance = distance.min(frame.saturating_sub(selected.start));
+    }
+    if selected.end < total {
+        distance = distance.min(selected.end.saturating_sub(frame + 1));
+    }
+    distance as f32 / fade as f32
+}
+
+/// A clip limited to its crop. Seek positions count from the start of the
+/// whole clip, and are held inside the selection.
+pub(crate) struct ClipSource<T>
+where
+    T: AsRef<[u8]> + Send + Sync + 'static,
+{
+    decoder: rodio::Decoder<Cursor<T>>,
+    selected: std::ops::Range<u32>,
+    total: u32,
+    rate: u32,
+    channels: u16,
+    frame: u32,
+    channel: u16,
+}
+
+pub(crate) fn clip_source<T>(clip: T, trim: Option<crate::Trim>) -> Result<ClipSource<T>, String>
+where
+    T: AsRef<[u8]> + Send + Sync + 'static,
+{
+    let (total, rate, channels) = {
+        let reader = hound::WavReader::new(Cursor::new(clip.as_ref()))
+            .map_err(|e| format!("Could not decode audio: {e}"))?;
+        (
+            reader.duration(),
+            reader.spec().sample_rate,
+            reader.spec().channels,
+        )
+    };
+    let decoder = wav_decoder(clip)?;
+    let selected = selected_frames(trim, total);
+    let start = selected.start;
+    let mut source = ClipSource {
+        decoder,
+        selected,
+        total,
+        rate,
+        channels,
+        frame: 0,
+        channel: 0,
+    };
+    if start > 0 {
+        source
+            .seek_to_frame(start)
+            .map_err(|e| format!("Could not seek audio: {e}"))?;
+    }
+    Ok(source)
+}
+
+impl<T> ClipSource<T>
+where
+    T: AsRef<[u8]> + Send + Sync + 'static,
+{
+    fn seek_to_frame(&mut self, frame: u32) -> Result<(), rodio::source::SeekError> {
+        let frame = frame.clamp(self.selected.start, self.selected.end);
+        self.decoder.try_seek(std::time::Duration::from_secs_f64(
+            f64::from(frame) / f64::from(self.rate),
+        ))?;
+        self.frame = frame;
+        self.channel = 0;
+        Ok(())
+    }
+}
+
+impl<T> Iterator for ClipSource<T>
+where
+    T: AsRef<[u8]> + Send + Sync + 'static,
+{
+    type Item = rodio::Sample;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.frame >= self.selected.end {
+            return None;
+        }
+        let sample = self.decoder.next()?;
+        let gain = cut_gain(self.frame, &self.selected, self.total, self.rate);
+        self.channel += 1;
+        if self.channel == self.channels {
+            self.channel = 0;
+            self.frame += 1;
+        }
+        Some(sample * gain)
+    }
+}
+
+impl<T> rodio::Source for ClipSource<T>
+where
+    T: AsRef<[u8]> + Send + Sync + 'static,
+{
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> rodio::ChannelCount {
+        self.decoder.channels()
+    }
+
+    fn sample_rate(&self) -> rodio::SampleRate {
+        self.decoder.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs_f64(
+            f64::from(self.selected.end - self.selected.start) / f64::from(self.rate),
+        ))
+    }
+
+    fn try_seek(&mut self, position: std::time::Duration) -> Result<(), rodio::source::SeekError> {
+        let frame = (position.as_secs_f64() * f64::from(self.rate)).round() as u32;
+        self.seek_to_frame(frame)
+    }
 }
 
 /// Apply a 250 ms linear fade to each end, using the same gain for every
@@ -154,8 +308,13 @@ fn import_wav(bytes: Vec<u8>) -> Result<Arc<[u8]>, String> {
 }
 
 fn time_label(seconds: f64) -> String {
-    let seconds = seconds.max(0.0) as u64;
-    format!("{:02}:{:02}", seconds / 60, seconds % 60)
+    let hundredths = (seconds.max(0.0) * 100.0).round() as u64;
+    format!(
+        "{:02}:{:02}.{:02}",
+        hundredths / 6000,
+        hundredths / 100 % 60,
+        hundredths % 100
+    )
 }
 
 impl Recording {
@@ -192,14 +351,10 @@ impl Editor {
 
     #[cfg(test)]
     pub(crate) fn for_test(target: (usize, usize), original: crate::Entry) -> Self {
-        let duration = original
-            .audio
-            .as_deref()
-            .and_then(|clip| clip_duration(clip).ok())
-            .unwrap_or(0.0);
-        Self {
+        let (clip, trim) = (original.audio.clone(), original.trim);
+        let mut editor = Self {
             target,
-            clip: original.audio.clone(),
+            clip: None,
             original,
             systems: Vec::new(),
             selected_system: 0,
@@ -209,10 +364,16 @@ impl Editor {
             error: None,
             playback: None,
             position: 0.0,
-            duration,
+            duration: 0.0,
+            trim: None,
+            frames: 0,
+            rate: 0,
+            peaks: None,
             diagnostics: Vec::new(),
             last_capture: None,
-        }
+        };
+        editor.set_clip(clip, trim);
+        editor
     }
 
     #[cfg(test)]
@@ -257,14 +418,10 @@ impl Editor {
         for line in &diagnostics {
             eprintln!("[audio] {line}");
         }
-        let duration = original
-            .audio
-            .as_deref()
-            .and_then(|clip| clip_duration(clip).ok())
-            .unwrap_or(0.0);
-        Self {
+        let (clip, trim) = (original.audio.clone(), original.trim);
+        let mut editor = Self {
             target,
-            clip: original.audio.clone(),
+            clip: None,
             original,
             systems,
             selected_system,
@@ -274,9 +431,124 @@ impl Editor {
             error,
             playback: None,
             position: 0.0,
-            duration,
+            duration: 0.0,
+            trim: None,
+            frames: 0,
+            rate: 0,
+            peaks: None,
             diagnostics,
             last_capture: None,
+        };
+        editor.set_clip(clip, trim);
+        editor
+    }
+
+    /// Replace the clip and everything derived from it.
+    fn set_clip(&mut self, clip: Option<Arc<[u8]>>, trim: Option<crate::Trim>) {
+        self.playback = None;
+        let reader = clip
+            .as_deref()
+            .and_then(|clip| hound::WavReader::new(Cursor::new(clip)).ok());
+        (self.frames, self.rate) = reader
+            .map(|reader| (reader.duration(), reader.spec().sample_rate))
+            .unwrap_or((0, 0));
+        self.duration = clip
+            .as_deref()
+            .and_then(|clip| clip_duration(clip).ok())
+            .unwrap_or(0.0);
+        self.peaks = clip.as_deref().and_then(crate::waveform::Peaks::from_clip);
+        self.clip = clip;
+        self.trim = trim;
+        self.position = self.selection().0;
+    }
+
+    fn audio_state(&self) -> crate::AudioState {
+        (self.clip.clone(), self.trim)
+    }
+
+    /// The selected part of the clip, in seconds.
+    fn selection(&self) -> (f64, f64) {
+        if self.trim.is_none() || self.rate == 0 {
+            return (0.0, self.duration);
+        }
+        let selected = selected_frames(self.trim, self.frames);
+        let rate = f64::from(self.rate);
+        (
+            f64::from(selected.start) / rate,
+            f64::from(selected.end) / rate,
+        )
+    }
+
+    /// Move a crop handle to a fraction of the clip, keeping at least 50 ms
+    /// selected. A selection of the whole clip is no crop at all.
+    fn move_handle(&mut self, handle: crate::waveform::Handle, fraction: f32) {
+        use crate::waveform::Handle;
+        if self.frames == 0 {
+            return;
+        }
+        let selected = selected_frames(self.trim, self.frames);
+        let frame = (f64::from(fraction.clamp(0.0, 1.0)) * f64::from(self.frames)).round() as u32;
+        let gap = (self.rate / 20).clamp(1, self.frames);
+        let moved = match handle {
+            Handle::Start => frame.min(selected.end.saturating_sub(gap))..selected.end,
+            Handle::End => selected.start..frame.max(selected.start + gap).min(self.frames),
+        };
+        if moved == selected {
+            return;
+        }
+        self.playback = None;
+        self.trim = (moved != (0..self.frames)).then_some(crate::Trim {
+            start: moved.start,
+            end: moved.end,
+        });
+        let (start, end) = self.selection();
+        self.position = self.position.clamp(start, end);
+    }
+
+    fn show_waveform(&mut self, ui: &mut egui::Ui, changed: &mut Option<crate::AudioState>) {
+        // A short recording grows from the left until it has filled this many
+        // seconds, then keeps the whole take in view.
+        const RECORDING_WINDOW: f64 = 10.0;
+        let view = if let Some(recording) = &self.recording {
+            let seconds =
+                recording.peaks.frames() as f64 / f64::from(recording.spec.sample_rate.max(1));
+            let extent = (seconds / seconds.max(RECORDING_WINDOW)) as f32;
+            crate::waveform::View {
+                peaks: Some(&recording.peaks),
+                extent,
+                selection: None,
+                playhead: Some((extent, time_label(seconds))),
+            }
+        } else {
+            let selected = selected_frames(self.trim, self.frames);
+            let total = self.frames.max(1) as f32;
+            let (start, end) = self.selection();
+            let usable = self.peaks.is_some() && self.frames > 0 && self.duration > 0.0;
+            crate::waveform::View {
+                peaks: self.peaks.as_ref(),
+                extent: 1.0,
+                selection: usable.then(|| crate::waveform::Selection {
+                    start: selected.start as f32 / total,
+                    end: selected.end as f32 / total,
+                    start_time: time_label(start),
+                    end_time: time_label(end),
+                }),
+                playhead: usable.then(|| {
+                    (
+                        (self.position / self.duration) as f32,
+                        time_label(self.position),
+                    )
+                }),
+            }
+        };
+        let interaction = crate::waveform::show(ui, view);
+        if let Some((handle, fraction)) = interaction.moved {
+            self.move_handle(handle, fraction);
+        } else if let Some(fraction) = interaction.seek {
+            self.seek(f64::from(fraction) * self.duration);
+        }
+        if interaction.released {
+            *changed = Some(self.audio_state());
         }
     }
 
@@ -421,6 +693,8 @@ impl Editor {
             spec,
             stats,
             started: Instant::now(),
+            peaks: crate::waveform::Peaks::new(spec.sample_rate, spec.channels),
+            peaked_samples: 0,
         });
         self.log("Input stream created and started.");
         Ok(())
@@ -443,18 +717,20 @@ impl Editor {
         if samples.is_empty() {
             return Err("No audio was recorded.".into());
         }
-        self.clip = Some(encode_recording(&mut samples, recording.spec)?);
-        self.duration = samples.len() as f64
-            / recording.spec.channels as f64
-            / recording.spec.sample_rate as f64;
-        self.position = 0.0;
+        let clip = encode_recording(&mut samples, recording.spec)?;
+        // A new take has nothing to do with the previous one's crop.
+        self.set_clip(Some(clip), None);
         self.log("Recorded WAV encoded successfully.");
         Ok(())
     }
 
     fn play(&mut self) -> Result<(), String> {
         self.playback = None;
-        let source = wav_decoder(self.clip.clone().ok_or("No clip attached")?)?;
+        let (start, end) = self.selection();
+        if self.position < start || self.position >= end {
+            self.position = start;
+        }
+        let source = clip_source(self.clip.clone().ok_or("No clip attached")?, self.trim)?;
         let mut stream = rodio::DeviceSinkBuilder::open_default_sink()
             .map_err(|e| format!("Could not open output device: {e}"))?;
         stream.log_on_drop(false);
@@ -470,14 +746,12 @@ impl Editor {
 
     pub fn sync_entry(&mut self, entry: &crate::Entry) {
         if self.original.audio != entry.audio {
+            self.set_clip(entry.audio.clone(), entry.trim);
+        } else if self.original.trim != entry.trim {
             self.playback = None;
-            self.clip = entry.audio.clone();
-            self.duration = self
-                .clip
-                .as_deref()
-                .and_then(|clip| clip_duration(clip).ok())
-                .unwrap_or(0.0);
-            self.position = 0.0;
+            self.trim = entry.trim;
+            let (start, end) = self.selection();
+            self.position = self.position.clamp(start, end);
         }
         self.original = entry.clone();
     }
@@ -495,7 +769,8 @@ impl Editor {
         if self.recording.is_some() || self.clip.is_none() {
             return;
         }
-        let position = position.clamp(0.0, self.duration);
+        let (start, end) = self.selection();
+        let position = position.clamp(start, end);
         if let Some((_, player)) = &self.playback {
             if let Err(error) = player.try_seek(std::time::Duration::from_secs_f64(position)) {
                 self.error = Some(format!("Could not seek audio: {error}"));
@@ -508,7 +783,7 @@ impl Editor {
     fn handle_action(
         &mut self,
         action: crate::keybinds::Action,
-        changed: &mut Option<Option<Arc<[u8]>>>,
+        changed: &mut Option<crate::AudioState>,
         project_actions: &mut Vec<crate::keybinds::Action>,
     ) {
         use crate::keybinds::Action;
@@ -523,7 +798,7 @@ impl Editor {
             Action::SaveProject | Action::SaveProjectAs => {
                 if self.recording.is_some() {
                     match self.stop() {
-                        Ok(()) => *changed = Some(self.clip.clone()),
+                        Ok(()) => *changed = Some(self.audio_state()),
                         Err(error) => {
                             self.error = Some(format!("Could not finish recording: {error}"));
                             return;
@@ -536,7 +811,7 @@ impl Editor {
                 if self.recording.is_some() {
                     match self.stop() {
                         Ok(()) => {
-                            *changed = Some(self.clip.clone());
+                            *changed = Some(self.audio_state());
                             self.error = None;
                         }
                         Err(error) => self.error = Some(format!("Recording error: {error}")),
@@ -558,12 +833,12 @@ impl Editor {
             }
             Action::RecorderStopPlayback if self.recording.is_none() => {
                 self.playback = None;
-                self.position = 0.0;
+                self.position = self.selection().0;
             }
             Action::RecorderSeekBack => self.seek(self.position - 5.0),
             Action::RecorderSeekForward => self.seek(self.position + 5.0),
-            Action::RecorderSeekStart => self.seek(0.0),
-            Action::RecorderSeekEnd => self.seek(self.duration),
+            Action::RecorderSeekStart => self.seek(self.selection().0),
+            Action::RecorderSeekEnd => self.seek(self.selection().1),
             _ => {}
         }
     }
@@ -572,14 +847,20 @@ impl Editor {
         if let Some((_, player)) = &self.playback {
             if player.empty() {
                 self.playback = None;
-                self.position = 0.0;
+                self.position = self.selection().0;
                 self.log("Playback finished.");
             } else {
                 self.position = player.get_pos().as_secs_f64().min(self.duration);
-                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                ctx.request_repaint_after(std::time::Duration::from_millis(33));
             }
         }
-        if let Some(recording) = &self.recording {
+        if let Some(recording) = &mut self.recording {
+            if let Ok(samples) = recording.samples.lock() {
+                recording
+                    .peaks
+                    .extend_i16(&samples[recording.peaked_samples..]);
+                recording.peaked_samples = samples.len();
+            }
             let failure = recording.error.lock().ok().and_then(|error| error.clone());
             if let Some(error) = failure {
                 self.last_capture = Some(recording.snapshot());
@@ -588,7 +869,7 @@ impl Editor {
                 self.log(format!("Stream error: {error}. {summary}"));
                 self.error = Some(error);
             }
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
     }
 
@@ -605,7 +886,7 @@ impl Editor {
             egui::ViewportId::from_hash_of("entry-audio"),
             egui::ViewportBuilder::default()
                 .with_title("Entry audio")
-                .with_inner_size([780.0, 380.0])
+                .with_inner_size([780.0, 540.0])
                 .with_min_inner_size([340.0, 300.0]),
             |ui, _class| {
                 if ui.input(|input| input.viewport().close_requested()) {
@@ -674,11 +955,8 @@ impl Editor {
                                     })
                                     .and_then(import_wav) {
                                     Ok(clip) => {
-                                        self.playback = None;
-                                        self.clip = Some(clip);
-                                        self.duration = self.clip.as_deref().and_then(|clip| clip_duration(clip).ok()).unwrap_or(0.0);
-                                        self.position = 0.0;
-                                        result = Some(self.clip.clone());
+                                        self.set_clip(Some(clip), None);
+                                        result = Some(self.audio_state());
                                         self.error = None;
                                         self.log("WAV import succeeded.");
                                     }
@@ -691,40 +969,18 @@ impl Editor {
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.add_enabled(self.clip.is_some(), egui::Button::new("Delete clip")).clicked() {
-                                self.playback = None;
-                                self.clip = None;
-                                self.position = 0.0;
-                                self.duration = 0.0;
-                                result = Some(None);
+                                self.set_clip(None, None);
+                                result = Some(self.audio_state());
+                            }
+                            if self.clip.is_some() {
+                                let (start, end) = self.selection();
+                                ui.label(time_label(end - start)).on_hover_text("Length of the cropped clip");
                             }
                         });
                     }
                 });
                 ui.add_space(18.0);
-                let recording_time = self.recording.as_ref().map(|recording| recording.started.elapsed().as_secs_f64());
-                let position = recording_time.unwrap_or(self.position);
-                ui.horizontal(|ui| {
-                    let fraction = if self.duration > 0.0 { (position / self.duration).clamp(0.0, 1.0) as f32 } else { 0.0 };
-                    ui.add_space((ui.available_width() - 65.0).max(0.0) * fraction);
-                    ui.label(egui::RichText::new(time_label(position)).size(22.0).strong());
-                });
-                let mut seek = self.position;
-                let response = ui.add_enabled_ui(self.recording.is_none() && self.clip.is_some() && self.duration > 0.0, |ui| {
-                    ui.spacing_mut().slider_width = ui.available_width();
-                    ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::RED;
-                    ui.visuals_mut().widgets.active.bg_fill = egui::Color32::RED;
-                    ui.visuals_mut().widgets.hovered.bg_fill = egui::Color32::RED;
-                    ui.add(egui::Slider::new(&mut seek, 0.0..=self.duration.max(0.001)).show_value(false))
-                }).inner;
-                if response.changed() {
-                    self.seek(seek);
-                }
-                ui.horizontal(|ui| {
-                    ui.label(time_label(0.0));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(time_label(recording_time.unwrap_or(self.duration)));
-                    });
-                });
+                self.show_waveform(ui, &mut result);
                 ui.add_space(20.0);
                 ui.horizontal(|ui| {
                     if ui.button("Close").clicked() { cancel = true; }
@@ -799,7 +1055,7 @@ impl Editor {
         if cancel {
             if self.recording.is_some() {
                 match self.stop() {
-                    Ok(()) => result = Some(self.clip.clone()),
+                    Ok(()) => result = Some(self.audio_state()),
                     Err(error) => {
                         self.log(format!("Stop failed: {error}"));
                         self.error = Some(error);
@@ -980,6 +1236,7 @@ mod tests {
             language: crate::Language::Latin,
             text: "salvē".into(),
             audio: Some(b"clip".as_slice().into()),
+            trim: None,
         };
         let mut editor = Editor::for_test((0, 0), entry);
         editor.duration = 12.0;
@@ -1008,6 +1265,7 @@ mod tests {
             language: crate::Language::Latin,
             text: "salvē".into(),
             audio: None,
+            trim: None,
         };
         let mut editor = Editor::for_test((0, 0), entry);
         let ctx = egui::Context::default();
@@ -1038,6 +1296,149 @@ mod tests {
                 crate::keybinds::Action::SaveProject
             ]
         );
+    }
+
+    fn test_clip(rate: u32, channels: u16, frames: u32) -> Arc<[u8]> {
+        let mut wav = Cursor::new(Vec::new());
+        let mut writer = hound::WavWriter::new(
+            &mut wav,
+            hound::WavSpec {
+                channels,
+                sample_rate: rate,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for _ in 0..frames * u32::from(channels) {
+            writer.write_sample(16384i16).unwrap();
+        }
+        writer.finalize().unwrap();
+        wav.into_inner().into()
+    }
+
+    #[test]
+    fn selected_frames_fit_any_clip() {
+        let trim = |start, end| Some(crate::Trim { start, end });
+        assert_eq!(selected_frames(None, 10), 0..10);
+        assert_eq!(selected_frames(trim(2, 6), 10), 2..6);
+        assert_eq!(selected_frames(trim(2, 60), 10), 2..10);
+        assert_eq!(selected_frames(trim(20, 60), 10), 9..10);
+        assert_eq!(selected_frames(trim(4, 4), 10), 4..5);
+        assert_eq!(selected_frames(trim(4, 8), 0), 0..0);
+    }
+
+    #[test]
+    fn cut_gain_ramps_only_edges_that_cut_into_the_clip() {
+        let selected = 1000..3000;
+        assert_eq!(cut_gain(1000, &selected, 4000, 10_000), 0.0);
+        assert_eq!(cut_gain(1050, &selected, 4000, 10_000), 0.5);
+        assert_eq!(cut_gain(2000, &selected, 4000, 10_000), 1.0);
+        assert_eq!(cut_gain(2999, &selected, 4000, 10_000), 0.0);
+        assert_eq!(cut_gain(0, &(0..4000), 4000, 10_000), 1.0);
+        assert_eq!(cut_gain(3999, &(0..4000), 4000, 10_000), 1.0);
+    }
+
+    #[test]
+    fn clip_source_plays_only_the_selection_and_seeks_inside_it() {
+        use rodio::Source;
+        let clip = test_clip(1000, 2, 1000);
+        let trim = Some(crate::Trim {
+            start: 250,
+            end: 750,
+        });
+        let source = clip_source(clip.clone(), trim).unwrap();
+        assert_eq!(source.total_duration().unwrap().as_secs_f64(), 0.5);
+        let samples: Vec<_> = source.collect();
+        assert_eq!(samples.len(), 1000);
+        assert_eq!(samples[0], 0.0);
+        assert!((samples[500] - 0.5).abs() < 0.001);
+        assert_eq!(*samples.last().unwrap(), 0.0);
+
+        let mut source = clip_source(clip.clone(), trim).unwrap();
+        source
+            .try_seek(std::time::Duration::from_millis(500))
+            .unwrap();
+        assert_eq!(source.by_ref().count(), 500);
+        source.try_seek(std::time::Duration::ZERO).unwrap();
+        assert_eq!(source.frame, 250);
+        source.try_seek(std::time::Duration::from_secs(9)).unwrap();
+        assert_eq!(source.next(), None);
+
+        assert_eq!(clip_source(clip, None).unwrap().count(), 2000);
+    }
+
+    #[test]
+    fn crop_handles_keep_a_minimum_selection_and_bound_seeking() {
+        use crate::keybinds::Action;
+        use crate::waveform::Handle;
+        let entry = crate::Entry {
+            participant: crate::Participant::Teacher,
+            language: crate::Language::Latin,
+            text: String::new(),
+            audio: Some(test_clip(1000, 1, 10_000)),
+            trim: None,
+        };
+        let mut editor = Editor::for_test((0, 0), entry);
+        assert_eq!(editor.selection(), (0.0, 10.0));
+        editor.move_handle(Handle::Start, 0.2);
+        editor.move_handle(Handle::End, 0.5);
+        assert_eq!(
+            editor.trim,
+            Some(crate::Trim {
+                start: 2000,
+                end: 5000
+            })
+        );
+        assert_eq!(editor.position, 2.0);
+        let (mut changed, mut actions) = (None, Vec::new());
+        editor.handle_action(Action::RecorderSeekEnd, &mut changed, &mut actions);
+        assert_eq!(editor.position, 5.0);
+        editor.handle_action(Action::RecorderSeekForward, &mut changed, &mut actions);
+        assert_eq!(editor.position, 5.0);
+        editor.handle_action(Action::RecorderSeekStart, &mut changed, &mut actions);
+        assert_eq!(editor.position, 2.0);
+
+        // Handles stop short of crossing each other.
+        editor.move_handle(Handle::Start, 0.9);
+        assert_eq!(editor.trim.unwrap().start, 4950);
+        editor.move_handle(Handle::End, 0.0);
+        assert_eq!(editor.trim.unwrap().end, 5000);
+
+        // Back to the whole clip means no crop.
+        editor.move_handle(Handle::Start, -1.0);
+        editor.move_handle(Handle::End, 2.0);
+        assert_eq!(editor.trim, None);
+    }
+
+    #[test]
+    fn replacing_the_clip_clears_the_crop_and_undo_restores_it() {
+        let trim = Some(crate::Trim {
+            start: 100,
+            end: 200,
+        });
+        let clip = test_clip(1000, 1, 1000);
+        let mut entry = crate::Entry {
+            participant: crate::Participant::Teacher,
+            language: crate::Language::Latin,
+            text: String::new(),
+            audio: Some(clip.clone()),
+            trim,
+        };
+        let mut editor = Editor::for_test((0, 0), entry.clone());
+        assert_eq!(editor.position, 0.1);
+        editor.set_clip(Some(test_clip(1000, 1, 500)), None);
+        assert_eq!(editor.selection(), (0.0, 0.5));
+        assert!(editor.peaks.is_some());
+
+        let mut editor = Editor::for_test((0, 0), entry.clone());
+        entry.trim = None;
+        editor.sync_entry(&entry);
+        assert_eq!(editor.selection(), (0.0, 1.0));
+        assert_eq!(editor.position, 0.1);
+        entry.trim = trim;
+        editor.sync_entry(&entry);
+        assert_eq!(editor.selection(), (0.1, 0.2));
     }
 
     #[test]
@@ -1074,7 +1475,7 @@ mod tests {
             writer.finalize().unwrap();
         }
         assert_eq!(clip_duration(&wav.into_inner()).unwrap(), 2.0);
-        assert_eq!(time_label(83.9), "01:23");
+        assert_eq!(time_label(83.9), "01:23.90");
         assert!(clip_duration(b"not a WAV").is_err());
     }
 

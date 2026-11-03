@@ -45,7 +45,7 @@ pub struct ScannedWord {
     pub alternatives: Vec<Vec<Syllable>>,
     /// Quantified spellings corresponding to `alternatives`.
     pub alternative_forms: Vec<String>,
-    /// True when alternatives disagree on the number of syllables.
+    /// True when alternatives have different numbers of syllables.
     pub ambiguous_syllable_count: bool,
     /// Accent index into `accent_syllables`, if determinable.
     pub accent: Option<usize>,

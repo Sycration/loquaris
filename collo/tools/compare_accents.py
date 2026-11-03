@@ -43,7 +43,7 @@ def source_accent(output, syllables):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=pathlib.Path,default=pathlib.Path('/tmp/opencode/collo-accents'))
-    parser.add_argument('--limit',type=int,default=2000,help='Evenly spaced unique words; 0 selects all')
+    parser.add_argument('--limit',type=int,default=2000,help='Evenly spaced unique words; 0 means all')
     parser.add_argument('--reference-timeout',type=float,default=5)
     args=parser.parse_args(); args.output.mkdir(parents=True,exist_ok=True)
     corpus=collections.defaultdict(set)
@@ -77,7 +77,7 @@ def main():
                 totals['compared']+=1
                 if expected==actual: totals['matches']+=1
                 else: out.write(f'{word}\t{[1,2,3,9,10,11][mode]}\t{expected}\t{actual}\t{source.strip()}\n')
-    print(f"{totals['words']} sampled words; {totals['matches']}/{totals['compared']} accent modes agree; {totals['unknown']} unknown-mode outputs, {totals['unaligned']} unaligned spellings, {totals['failures']} C++ failures")
+    print(f"{totals['words']} sampled words; {totals['matches']}/{totals['compared']} accent modes match; {totals['unknown']} unknown-mode outputs, {totals['unaligned']} unaligned spellings, {totals['failures']} C++ failures")
     print(f"Differences: {args.output/'differences.tsv'}")
 
 if __name__=='__main__':main()

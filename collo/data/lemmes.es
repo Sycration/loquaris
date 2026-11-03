@@ -3857,7 +3857,6 @@ foedo:afear, desfigurar, mutilar; manchar; oscurecer; envilecer, mancillar
 foeteo:heder, repugnar
 foetidus:fétido, repugnante
 folium:hoja, follaje
-fomenta:tópico, calmante, lenitivo, cataplasma; alivio, consuelo
 fons:fuente, manantial. agua (poético); causa, principio
 Fonteius:Fonteius
 foramen:agujero, abertura, orificio

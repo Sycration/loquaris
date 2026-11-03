@@ -184,7 +184,7 @@ fn has_cum_enclitic(word: &str) -> bool {
 }
 /// A surviving Viterbi state. Histories are stored as back-pointers into a
 /// shared arena; `rank` orders the histories of all live paths
-/// lexicographically, which is all the tie-breaking rule needs.
+/// lexicographically, which is sufficient for the tie-breaking rule.
 #[derive(Clone, Copy)]
 struct Path {
     score: f64,

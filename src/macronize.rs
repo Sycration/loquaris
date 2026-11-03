@@ -26,6 +26,13 @@ pub fn macronize(text: &str) -> String {
 fn letters(text: &str) -> Vec<(char, Vec<char>)> {
     let mut letters: Vec<(char, Vec<char>)> = Vec::new();
     for character in text.nfd() {
+        // Some short y's in the Collatinus data are a Cyrillic ў, which decomposes
+        // into a lookalike letter that does not compare equal to a y.
+        let character = match character {
+            'у' => 'y',
+            'У' => 'Y',
+            other => other,
+        };
         if is_combining_mark(character) {
             if let Some((_, marks)) = letters.last_mut() {
                 marks.push(character);
@@ -73,24 +80,26 @@ fn heavy_by_position(letters: &[(char, Vec<char>)], vowel: usize) -> bool {
     false
 }
 
-/// How well an analysis agrees with the vowel quantities written in a word.
+/// How well an analysis matches the vowel quantities written in a word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum QuantityMatch {
-    /// A written macron or breve contradicts the analysis.
+    /// A written macron or breve conflicts with the analysis.
     Conflict,
-    /// Written marks agree, but some unmarked vowel is long in the analysis,
+    /// Written marks match, but some unmarked vowel is long in the analysis,
     /// or the spelling can't be aligned with the analysis.
-    MarksAgree,
-    /// Marked vowels agree and every unmarked vowel can be short.
+    MarksMatch,
+    /// Marked vowels match and every unmarked vowel can be short.
     Exact,
 }
 
 const MACRON: char = '\u{0304}';
 const BREVE: char = '\u{0306}';
+/// Collatinus's marker on a u that is not a vowel of its own, as in sụādeo.
+const DOT_BELOW: char = '\u{0323}';
 
 /// Compare the quantities written in `written` with an analysis's form.
 /// Diphthongs and vowels long only by position are not compared, since
-/// Collo's marks there say nothing about the vowel itself.
+/// Collo's marks there give no information about the vowel itself.
 pub fn quantity_match(written: &str, analysis: &collo::Analysis) -> QuantityMatch {
     let written_letters = letters(written);
     let form_letters = letters(&format!("{}{}", analysis.form, analysis.suffix));
@@ -103,7 +112,7 @@ pub fn quantity_match(written: &str, analysis: &collo::Analysis) -> QuantityMatc
                     == collo::normalize(&right.to_string()).to_lowercase()
             });
     if !aligned {
-        return QuantityMatch::MarksAgree;
+        return QuantityMatch::MarksMatch;
     }
     let mut result = QuantityMatch::Exact;
     let mut index = 0;
@@ -128,9 +137,11 @@ pub fn quantity_match(written: &str, analysis: &collo::Analysis) -> QuantityMatc
         }
         if is_vowel {
             let written_marks = &written_letters[index].1;
+            // A vowel marked both ways can be either, so no mark conflicts with it.
+            let anceps = form_marks.contains(&MACRON) && form_marks.contains(&BREVE);
             let form_long =
-                form_marks.contains(&MACRON) && !heavy_by_position(&form_letters, index);
-            let form_short = form_marks.contains(&BREVE);
+                form_marks.contains(&MACRON) && !anceps && !heavy_by_position(&form_letters, index);
+            let form_short = form_marks.contains(&BREVE) && !anceps;
             if written_marks.contains(&MACRON) {
                 if form_short {
                     return QuantityMatch::Conflict;
@@ -140,7 +151,7 @@ pub fn quantity_match(written: &str, analysis: &collo::Analysis) -> QuantityMatc
                     return QuantityMatch::Conflict;
                 }
             } else if form_long {
-                result = QuantityMatch::MarksAgree;
+                result = QuantityMatch::MarksMatch;
             }
         }
         index += 1;
@@ -148,12 +159,12 @@ pub fn quantity_match(written: &str, analysis: &collo::Analysis) -> QuantityMatc
     result
 }
 
-/// Indices of the analyses that agree with the written quantities: those no
-/// macron or breve contradicts. With `unmarked_short`, unmarked vowels are also
-/// read as short when some analysis allows it, so "malae" is mălus rather than
-/// māla; otherwise they rule nothing out. If every analysis contradicts the
-/// marks, all are kept.
-pub fn preferred_analyses(
+/// Indices of the analyses that match the written quantities: those with no
+/// conflicting macron or breve. With `unmarked_short`, unmarked vowels are also
+/// read as short when an analysis with them short exists, so "malae" is mălus
+/// rather than māla; otherwise no analysis is excluded because of them. If every
+/// analysis conflicts with the marks, all are kept.
+pub fn matching_analyses(
     written: &str,
     analyses: &[collo::Analysis],
     unmarked_short: bool,
@@ -169,7 +180,7 @@ pub fn preferred_analyses(
             .max()
             .unwrap_or(QuantityMatch::Conflict)
     } else {
-        QuantityMatch::MarksAgree
+        QuantityMatch::MarksMatch
     };
     let keep: Vec<_> = (0..analyses.len())
         .filter(|&index| matches[index] >= required)
@@ -179,6 +190,25 @@ pub fn preferred_analyses(
     } else {
         keep
     }
+}
+
+/// A Collo form or headword as a Latin reader expects to see it: macrons on
+/// naturally long vowels, and no breves or marks on diphthongs and vowels long
+/// only by position. Collo's own marks are for scansion.
+pub fn reader_form(form: &str) -> String {
+    let unmarked: String = letters(form)
+        .into_iter()
+        .flat_map(|(base, marks)| {
+            std::iter::once(base).chain(
+                marks
+                    .into_iter()
+                    .filter(|mark| ![MACRON, BREVE, DOT_BELOW].contains(mark)),
+            )
+        })
+        .collect::<String>()
+        .nfc()
+        .collect();
+    apply_macrons(&unmarked, form, false).unwrap_or(unmarked)
 }
 
 pub fn analysis_word(
@@ -196,8 +226,8 @@ pub fn analysis_word(
 fn apply_macrons(original: &str, form: &str, replace_quantities: bool) -> Option<String> {
     let mut original_letters = letters(original);
     let form_letters = letters(form);
-    // Some analyses reconstruct contractions, assimilations, or ligatures. Never
-    // rewrite the user's spelling or guess where a mark belongs in those cases.
+    // Some analyses contain reconstructed contractions, assimilations, or ligatures.
+    // In those cases the user's spelling is unchanged and no mark is added.
     if original_letters.len() != form_letters.len()
         || original_letters
             .iter()
@@ -292,6 +322,41 @@ mod tests {
     }
 
     #[test]
+    fn reader_forms_keep_only_the_marks_a_reader_expects() {
+        for (form, expected) in [
+            ("pŭēlla", "puella"),
+            ("ămo", "amo"),
+            ("ōdī", "ōdī"),
+            ("stēlla", "stella"),
+            ("āequus,āecus", "aequus,aecus"),
+            ("rĕgĭō\u{306}", "regiō"),
+            ("sụādeo", "suādeo"),
+            ("Āeschўlus", "Aeschylus"),
+            ("Prўtănis", "Prytanis"),
+        ] {
+            assert_eq!(reader_form(form), expected);
+        }
+        assert!(reader_form("Āeschўlus").is_ascii());
+    }
+
+    #[test]
+    fn a_vowel_marked_both_ways_matches_either_written_mark() {
+        let mut analysis = collo::analyze("regio")
+            .into_iter()
+            .next()
+            .expect("regio is in the lexicon");
+        analysis.form = "rĕgĭō\u{306}".into();
+        analysis.suffix = String::new();
+        for written in ["regiō", "regiŏ"] {
+            assert_ne!(
+                quantity_match(written, &analysis),
+                QuantityMatch::Conflict,
+                "{written}"
+            );
+        }
+    }
+
+    #[test]
     fn removes_macrons_on_marked_diphthongs_but_not_hiatus() {
         for (original, form, expected) in [
             ("puellae", "pŭēllāe", "puellae"),
@@ -310,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_infer_vowel_length_from_position() {
+    fn does_not_derive_vowel_length_from_position() {
         assert_eq!(
             apply_macrons("puella", "pŭēllă", false).as_deref(),
             Some("puella")
@@ -328,10 +393,10 @@ mod tests {
     }
 
     #[test]
-    fn written_quantities_choose_between_readings() {
+    fn written_quantities_narrow_the_readings() {
         let lemmas = |word: &str, unmarked_short| {
             let all = collo::Lemmatizer::new().analyze(word, true);
-            let mut keys: Vec<_> = preferred_analyses(word, &all, unmarked_short)
+            let mut keys: Vec<_> = matching_analyses(word, &all, unmarked_short)
                 .into_iter()
                 .map(|index| all[index].lemma.key)
                 .collect();
@@ -342,14 +407,14 @@ mod tests {
         for unmarked_short in [false, true] {
             assert_eq!(lemmas("mālae", unmarked_short), ["mala"]);
             assert_eq!(lemmas("mălae", unmarked_short), ["malus"]);
-            // A vowel long only by position (ēst) says nothing about its length.
+            // A vowel long only by position (ēst) gives no information about its length.
             assert_eq!(lemmas("est", unmarked_short).len(), 2);
-            // When every reading has a long unmarked vowel, none is ruled out.
+            // When every reading has a long unmarked vowel, none is excluded.
             assert!(lemmas("amica", unmarked_short).contains(&"amica"));
         }
-        // By default, unmarked vowels rule nothing out.
+        // By default, no reading is excluded because of unmarked vowels.
         assert_eq!(lemmas("malae", false), ["mala", "malus"]);
-        // Optionally they are short when a reading allows it.
+        // Optionally they are short when a reading with them short exists.
         assert_eq!(lemmas("malae", true), ["malus"]);
         assert_eq!(lemmas("Malae", true), ["malus"]);
     }
@@ -370,10 +435,10 @@ mod tests {
             assert_eq!(quantity_match(written, &puellae), QuantityMatch::Exact);
         }
         assert_eq!(quantity_match("pūellae", &puellae), QuantityMatch::Conflict);
-        // Spellings that can't be aligned are neither preferred nor ruled out.
+        // Spellings that can't be aligned are neither ranked first nor excluded.
         assert_eq!(
             quantity_match("amasti", &analysis("amasti", "ămāvĭstī")),
-            QuantityMatch::MarksAgree
+            QuantityMatch::MarksMatch
         );
     }
 
@@ -407,8 +472,8 @@ mod tests {
                 selected.morphology("en")
             );
         }
-        // Current collo behavior: it selects perfect "vēnī" here even though
-        // the sentence calls for the imperative "venī".
+        // Current collo behavior: the selected reading here is the perfect "vēnī",
+        // although the sentence requires the imperative "venī".
         assert_eq!(
             macronize(sentence),
             "Puella puellae rosam mihi cum amīcā dat: serve, vēnī!"

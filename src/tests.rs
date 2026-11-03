@@ -37,6 +37,7 @@ fn lesson_recording_summary_counts_clips_and_gaps() {
         language: Language::Latin,
         text: String::new(),
         audio,
+        trim: None,
     };
     let mut lesson = Lesson {
         name: "First".into(),
@@ -90,15 +91,15 @@ fn lesson_recording_summary_counts_clips_and_gaps() {
 }
 
 #[test]
-fn cached_lesson_recording_summaries_follow_history_and_new_entries() {
+fn cached_lesson_recording_summaries_update_with_history_and_new_entries() {
     let mut app = sample_app();
     app.lessons[0].entries.truncate(1);
     assert_eq!(app.recording_summaries()[0], "Recordings incomplete");
     let command = Command::SetAudio {
         lesson: 0,
         index: 0,
-        before: None,
-        after: Some(test_wav(4, 4)),
+        before: (None, None),
+        after: (Some(test_wav(4, 4)), None),
     };
     app.apply_command(command.clone(), true);
     app.push_history(command);
@@ -161,6 +162,7 @@ fn sample_app() -> App {
     .into_iter()
     .map(|(participant, language, text)| Entry {
         audio: None,
+        trim: None,
         participant,
         language,
         text: text.into(),
@@ -372,8 +374,8 @@ fn entry_audio_is_saved_moved_and_undoable() {
     let command = Command::SetAudio {
         lesson: 0,
         index: 1,
-        before: None,
-        after: Some(b"RIFF".as_slice().into()),
+        before: (None, None),
+        after: (Some(b"RIFF".as_slice().into()), None),
     };
     app.apply_command(command.clone(), true);
     app.push_history(command);
@@ -414,6 +416,7 @@ fn audio_marker_is_only_shown_on_the_inner_side_of_attached_entries() {
         language: Language::Latin,
         text: String::new(),
         audio: None,
+        trim: None,
     };
     assert!(audio_marker_rect(rect, &entry).is_none());
     entry.audio = Some(b"clip".as_slice().into());
@@ -447,6 +450,7 @@ fn entry_markers_remain_outside_the_center_scrollbar() {
             language: Language::Latin,
             text: String::new(),
             audio: Some(b"clip".as_slice().into()),
+            trim: None,
         };
         let marker = audio_marker_rect(rect, &entry).unwrap();
         if participant == Participant::Teacher {
@@ -467,8 +471,8 @@ fn undo_redo_refreshes_open_recorder_clip() {
     let command = Command::SetAudio {
         lesson: 0,
         index: 1,
-        before: None,
-        after: Some(b"RIFF".as_slice().into()),
+        before: (None, None),
+        after: (Some(b"RIFF".as_slice().into()), None),
     };
     app.apply_command(command.clone(), true);
     app.push_history(command);
@@ -536,12 +540,14 @@ fn multiselection_modifiers_and_anchor_work_across_lessons() {
         entries: vec![
             Entry {
                 audio: None,
+                trim: None,
                 participant: Participant::Student,
                 language: Language::Latin,
                 text: "one".into(),
             },
             Entry {
                 audio: None,
+                trim: None,
                 participant: Participant::Student,
                 language: Language::Latin,
                 text: "two".into(),
@@ -687,12 +693,14 @@ fn contiguous_groups_move_across_boundaries_without_reordering() {
         entries: vec![
             Entry {
                 audio: None,
+                trim: None,
                 participant: Participant::Student,
                 language: Language::Latin,
                 text: "6".into(),
             },
             Entry {
                 audio: None,
+                trim: None,
                 participant: Participant::Student,
                 language: Language::Latin,
                 text: "7".into(),
@@ -771,6 +779,7 @@ fn entry_display_and_editor_have_matching_geometry() {
         let mut measured = None;
         let mut entry = Entry {
             audio: None,
+            trim: None,
             participant: Participant::Teacher,
             language,
             text: text.into(),
@@ -985,7 +994,7 @@ fn auto_macronizing_opens_review_for_ambiguous_words() {
 }
 
 #[test]
-fn entry_shortcuts_respect_selection_direction_and_undo() {
+fn entry_shortcuts_use_selection_direction_and_undo() {
     let mut app = sample_app();
     assert!(!app.selected_entry_shortcut(keybinds::Action::MoveToStudent));
     app.selected_entry = Some((0, 0));
@@ -1011,6 +1020,7 @@ fn moving_entries_crosses_lesson_boundaries_and_undoes() {
         name: "Next".into(),
         entries: vec![Entry {
             audio: None,
+            trim: None,
             participant: Participant::Student,
             language: Language::Latin,
             text: "next".into(),
@@ -1214,7 +1224,7 @@ fn render(app: &mut App, ctx: &egui::Context) {
 }
 
 #[test]
-fn side_panel_searches_lemmas_and_follows_edits() {
+fn side_panel_searches_lemmas_and_updates_with_edits() {
     let mut app = sample_app();
     let ctx = egui::Context::default();
     configure_fonts(&ctx);
@@ -1416,6 +1426,7 @@ fn going_to_an_entry_centres_it_in_the_script() {
     let entries = (0..60)
         .map(|n| Entry {
             audio: None,
+            trim: None,
             participant: Participant::Teacher,
             language: Language::L1,
             text: format!("Line {n}"),

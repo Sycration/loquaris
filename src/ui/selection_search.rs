@@ -3,7 +3,7 @@
 //!
 //! egui reports a finished label selection only as an output command at the
 //! very end of a pass, after the app has drawn. This plugin captures it so the
-//! next frame can search it. The command doesn't say which label the selection
+//! search can run on it in the next frame. The command doesn't say which label the selection
 //! is in, and egui also sends it for a plain click (with the label's whole
 //! text), so the app tracks whether the transcript text was really selected:
 //! dragged across or double- or triple-clicked since the last press.

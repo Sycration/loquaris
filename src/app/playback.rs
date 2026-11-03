@@ -1,4 +1,4 @@
-//! Whole-lesson playback that follows along in the selection.
+//! Whole-lesson playback, with the selection updated to the current entry.
 use super::App;
 use crate::{lesson_player, model::lesson_recording_summary};
 use eframe::egui;

@@ -22,6 +22,17 @@ impl Language {
     }
 }
 
+/// The part of a clip that is played and exported, in frames with `end`
+/// exclusive. The whole clip is kept, so a crop can be widened again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Trim {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// An entry's clip together with its crop.
+pub type AudioState = (Option<std::sync::Arc<[u8]>>, Option<Trim>);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub participant: Participant,
@@ -29,6 +40,8 @@ pub struct Entry {
     pub text: String,
     /// WAV bytes; shared cheaply across undo history snapshots.
     pub audio: Option<std::sync::Arc<[u8]>>,
+    /// The selected part of `audio`; `None` means all of it.
+    pub trim: Option<Trim>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,7 +78,7 @@ pub fn lesson_recording_summary(lesson: &Lesson, gaps: project::AudioGaps) -> St
     }
     let duration = lesson.entries.iter().try_fold(0.0, |sum, entry| {
         let clip = entry.audio.as_deref()?;
-        Some(sum + audio::clip_duration(clip).ok()?)
+        Some(sum + audio::selected_duration(clip, entry.trim).ok()?)
     });
     let Some(duration) = duration else {
         return "Recordings incomplete".into();

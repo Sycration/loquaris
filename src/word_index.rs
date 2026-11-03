@@ -104,7 +104,7 @@ pub struct WordIndex {
     analysis_ids: HashMap<AnalysisLookupKey, u32>,
     analysis_keys: Vec<AnalysisKey>,
     analyses: Vec<std::sync::Arc<[collo::Analysis]>>,
-    /// Lemmas of the analyses no written macron or breve rules out.
+    /// Lemmas of the analyses not excluded by a written macron or breve.
     analysis_lemmas: Vec<std::sync::Arc<[u32]>>,
     /// The subset that remains when unmarked vowels are read as short.
     analysis_short_lemmas: Vec<std::sync::Arc<[u32]>>,
@@ -193,10 +193,10 @@ impl WordIndex {
         if let Some(&id) = self.analysis_ids.get(&lookup) {
             return id;
         }
-        // The cache keeps every analysis (auto-macronize needs them all); only
+        // The cache stores every analysis (auto-macronize uses them all); only
         // readings that fit the written quantities identify the word's lemma.
         let preferred = |unmarked_short| -> Vec<&collo::Analysis> {
-            crate::macronize::preferred_analyses(&key.token, &analyses, unmarked_short)
+            crate::macronize::matching_analyses(&key.token, &analyses, unmarked_short)
                 .into_iter()
                 .map(|index| &analyses[index])
                 .collect()
@@ -327,7 +327,7 @@ impl WordIndex {
     }
 
     /// Rebuild occurrence indexes after lesson/entry structure or language
-    /// changes. Unique-token analyses survive the rebuild.
+    /// changes. Unique-token analyses are retained through the rebuild.
     pub fn rebuild(&mut self, lessons: &[Lesson]) {
         self.entries.clear();
         self.entry_ids.clear();
@@ -627,13 +627,13 @@ impl WordIndex {
             })
     }
 
-    pub fn first_use_lemmas(&self, lesson: usize, entry: usize) -> Vec<&'static str> {
+    pub fn first_use_lemmas(&self, lesson: usize, entry: usize) -> Vec<String> {
         self.first_lemmas_by_entry
             .get(lesson)
             .and_then(|entries| entries.get(entry))
             .into_iter()
             .flatten()
-            .map(|&lemma| self.lemmas[lemma as usize].headword)
+            .map(|&lemma| crate::macronize::reader_form(self.lemmas[lemma as usize].headword))
             .collect()
     }
 
@@ -695,7 +695,7 @@ impl WordIndex {
     }
 
     /// Latin words with this lemma among their readings. With `unmarked_short`,
-    /// unmarked vowels are read as short when a reading allows it.
+    /// unmarked vowels are read as short when a reading with them short exists.
     pub fn lemma_occurrences(
         &self,
         lemma_key: &str,
@@ -772,6 +772,7 @@ mod tests {
                     language: *language,
                     text: (*text).into(),
                     audio: None,
+                    trim: None,
                 })
                 .collect(),
         }
@@ -881,11 +882,13 @@ mod tests {
         let second = index.first_use_lemmas(0, 1);
         let third = index.first_use_lemmas(0, 2);
         let headword = |key: &str| {
-            collo::lemmas()
-                .iter()
-                .find(|lemma| lemma.key == key)
-                .unwrap()
-                .headword
+            crate::macronize::reader_form(
+                collo::lemmas()
+                    .iter()
+                    .find(|lemma| lemma.key == key)
+                    .unwrap()
+                    .headword,
+            )
         };
         assert!(first.contains(&headword("puella")));
         assert!(!second.contains(&headword("puella")));

@@ -2,7 +2,7 @@
 
 collo is a port, so these scripts check it against the original C++ code from
 Collatinus. They compile the original code, run both programs on the unique words
-or lines of the texts in `texts/`, and report where the two disagree.
+or lines of the texts in `texts/`, and report where the two outputs differ.
 
 ## Requirements
 
@@ -57,8 +57,8 @@ This compares the contextual tags and each word's pattern of vowel quantities,
 line by line. `--sentences` joins wrapped lines so that whole sentences are
 compared instead.
 
-- Unknown words are left out. So are words where the original can't decide how
-  many syllables there are.
+- Unknown words are left out. So are words for which the original gives no
+  single syllable count.
 - Lines where the words can't be lined up between the two programs are reported
   separately.
 - When the original finds a word it can analyze but can't tag, its HTML output
@@ -97,3 +97,26 @@ all.
 Scansion, spelling variants and contextual tagging haven't been fully checked
 against the original. The likeliest places for differences are uncommon cases of
 prosody and spelling.
+
+## Deliberate differences
+
+collo corrects these entries of `data/lemmes.la` against Lewis & Short, so its
+results differ from Collatinus on them. Their old forms could not be reached from the
+real Latin spelling.
+
+| Entry | Collatinus | collo |
+|---|---|---|
+| `virgulta` | `templum`, which gave `virgulum` | `castra`, as for a plural-only neuter |
+| `fomenta` | A separate lemma on `templum`, which gave `fomenum` | Removed; it is the plural of `fōmentum` |
+| `habiliter` | `acriter`, which gave `habiriter` | `inv`, as an uncompared adverb |
+| `Lingones` | Stem `Ligōn` | Stem `Līngŏn` |
+| `cito` | `adve`, whose base form is `cite` | New model `advo`, with `cito`, `citius`, `citissime` |
+| `molo` | `moneo`, and a 1st conjugation `molo3` | `lego` only; L&S gives `mŏlo, ŭi, ĭtum, 3` |
+
+The frequency of the adverb `cito` also rises from 1 to 100, so that contextual
+tagging selects it over the verb `cito`. That number is an estimate, not a corpus count: it
+is between `citus` (60) and `celeriter` (188), and any value from 10 up gives the
+same readings in the sentences tested.
+
+`habiliter` and `molo` also gain English glosses from Lewis & Short, and
+`fōmentum` now also has the English senses of the removed `fomenta`.

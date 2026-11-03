@@ -80,7 +80,7 @@ fn lengthen_before_consonant(text: &mut String) {
     };
     *text = chars.into_iter().collect();
 }
-// Collatinus marks vowels without an explicit quantity as common in stems.
+// In the Collatinus data, vowels without an explicit quantity are common in stems.
 fn common_vowels(text: &str) -> String {
     let initial_uppercase = text.chars().next().is_some_and(char::is_uppercase);
     let mut result = String::new();

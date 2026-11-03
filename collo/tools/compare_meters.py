@@ -59,7 +59,7 @@ def main():
             if original==rust: total['matches']+=1
             else: out.write(f'{name}\t{text}\t{",".join(feet)}\t{rust}\n')
     for name,total in totals.items():
-        print(f"{name}: {total['matches']}/{total['compared']} whole-line meter classifications agree; {total['source_hexameter_misses']} C++ hexameter misses with a valid quantity pattern, {total['indeterminate']} indeterminate reference lines, {total['nonstandard_pentameters']} nonstandard C++ pentameters, {total['failures']} C++ failures")
+        print(f"{name}: {total['matches']}/{total['compared']} whole-line meter classifications match; {total['source_hexameter_misses']} C++ hexameter misses with a valid quantity pattern, {total['indeterminate']} indeterminate reference lines, {total['nonstandard_pentameters']} nonstandard C++ pentameters, {total['failures']} C++ failures")
     print(f'Differences: {args.output/"differences.tsv"}')
 
 if __name__=='__main__':main()

@@ -8782,7 +8782,6 @@ folium:feuille
 folliculus:petit sac (de cuir), balle, ballon [jeu], enveloppe (du grain, des légumes, des fruits), gousse
 follis:soufflet [pour le feu], outre gonflée, ballon, bourse de cuir
 follitus:pourvu d'une bourse
-fomenta:aliments, calmant, baume, adoucissant
 fomentum:aliment, adoucissant, calmant
 fomes:brindilles, copeaux [pour le feu], aliment, stimulant
 fons:source, fontaine, eau (poétique); la cause, principe
@@ -13849,7 +13848,6 @@ mollis:mou, fluide, souple, flexible
 molliter:mollement, avec douceur
 mollitia:douceur
 mollities:souplesse, flexibilité, douceur, moelleux [de la laine], mollesse
-molo3:moudre
 molocinarius:teinturier [en mauve]
 molo:moudre
 Molorcheus:de Molorchus

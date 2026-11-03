@@ -14,10 +14,11 @@ mod project;
 mod recent_projects;
 mod search;
 mod ui;
+mod waveform;
 mod word_index;
 
 use eframe::egui;
-pub use model::{Entry, Language, Lesson, Participant};
+pub use model::{AudioState, Entry, Language, Lesson, Participant, Trim};
 
 fn main() -> eframe::Result {
     eframe::run_native(

@@ -50,16 +50,22 @@ impl App {
                 .get(lesson)
                 .and_then(|lesson| lesson.entries.get(index))
             {
-                Some(entry) if *entry == editor.original && entry.audio != after => {
+                Some(entry)
+                    if *entry == editor.original && (entry.audio.clone(), entry.trim) != after =>
+                {
                     self.execute(Command::SetAudio {
                         lesson,
                         index,
-                        before: entry.audio.clone(),
+                        before: (entry.audio.clone(), entry.trim),
                         after,
                     });
                     editor.original.audio = self.lessons[lesson].entries[index].audio.clone();
+                    editor.original.trim = self.lessons[lesson].entries[index].trim;
                 }
-                Some(entry) if *entry != editor.original && editor.original.audio != after => {
+                Some(entry)
+                    if *entry != editor.original
+                        && (editor.original.audio.clone(), editor.original.trim) != after =>
+                {
                     Self::show_file_error(
                         "The entry changed while the audio window was open. The clip was not applied.",
                     );

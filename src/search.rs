@@ -36,9 +36,9 @@ pub struct Search {
     pub query: String,
     mode: SearchMode,
     analysis: Vec<TaggedWord>,
-    /// Per query word, how many analyses its written vowel quantities ruled out.
+    /// Per query word, how many analyses were excluded by its written vowel quantities.
     ruled_out: Vec<usize>,
-    /// Read unmarked vowels as short when a reading allows it.
+    /// Read unmarked vowels as short when a reading with them short exists.
     unmarked_short: bool,
     /// Match the query as text even when it is a single Latin word.
     exact_text: bool,
@@ -110,7 +110,7 @@ impl Search {
         &self.analysis
     }
 
-    /// For each query word, how many analyses its macrons or breves ruled out.
+    /// For each query word, how many analyses were excluded by its macrons or breves.
     pub fn ruled_out(&self) -> &[usize] {
         &self.ruled_out
     }
@@ -124,10 +124,10 @@ impl Search {
         let analyzer = collo::Lemmatizer::new();
         let mut ruled_out = Vec::new();
         // Tag with only the readings that fit the written quantities, so the
-        // contextual choice respects them too.
+        // contextual selection is limited to them too.
         self.analysis = analyzer.tag_text_with(&self.query, |token, sentence_start| {
             let all = analyzer.analyze(token, sentence_start);
-            let keep = crate::macronize::preferred_analyses(token, &all, self.unmarked_short);
+            let keep = crate::macronize::matching_analyses(token, &all, self.unmarked_short);
             ruled_out.push(all.len() - keep.len());
             keep.into_iter().map(|index| all[index].clone()).collect()
         });
@@ -143,7 +143,7 @@ impl Search {
 
     /// Search for a lemma, showing its headword as the query.
     pub fn search_lemma(&mut self, lemma: &'static collo::Lemma) {
-        self.set_query(lemma.headword.to_owned());
+        self.set_query(crate::macronize::reader_form(lemma.headword));
         self.choose_lemma(lemma);
     }
 
@@ -186,7 +186,7 @@ pub fn entry_hits(hits: &[Hit], lesson: usize, entry: usize) -> &[Hit] {
     &hits[start..start + len]
 }
 
-/// A single word that Collo recognises is searched by lemma; anything else as text.
+/// A single word with analyses from Collo is searched by lemma; anything else as text.
 fn default_mode(query: &str, analysis: &[TaggedWord]) -> SearchMode {
     let [word] = analysis else {
         return SearchMode::Text;
@@ -309,6 +309,7 @@ pub fn translation_language(l1_name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::{Entry, Language};
 
     fn lessons(texts: &[&[(Participant, Language, &str)]]) -> Vec<Lesson> {
@@ -324,10 +325,28 @@ mod tests {
                         language,
                         text: text.into(),
                         audio: None,
+                        trim: None,
                     })
                     .collect(),
             })
             .collect()
+    }
+
+    #[test]
+    fn searching_a_lemma_shows_its_reader_form_and_keeps_its_reading() {
+        for (key, shown) in [("regio", "regiō"), ("puella", "puella")] {
+            let lemma = collo::find_lemma(key, false).unwrap();
+            let mut search = Search::default();
+            search.search_lemma(lemma);
+            assert_eq!(search.query, shown);
+            assert_eq!(search.mode(), SearchMode::Lemma(lemma));
+            assert!(
+                lemma_options(&search.analysis()[0])
+                    .iter()
+                    .any(|option| std::ptr::eq(*option, lemma)),
+                "{key}"
+            );
+        }
     }
 
     #[test]
@@ -358,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn single_latin_word_searches_its_lemma_in_every_form() {
+    fn single_latin_word_is_searched_by_lemma_in_every_form() {
         let lessons = lessons(&[
             &[(Participant::Teacher, Language::Latin, "Puella cantat.")],
             &[
@@ -370,7 +389,7 @@ mod tests {
         let mut search = Search::default();
         search.set_query("puellae".into());
         let SearchMode::Lemma(lemma) = search.mode() else {
-            panic!("a known Latin word should search by lemma");
+            panic!("a known Latin word should be searched by lemma");
         };
         assert_eq!(lemma.key, "puella");
         let hits = search.hits(&lessons, &index, 0).to_vec();
@@ -396,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn macrons_decide_which_lemma_a_word_is() {
+    fn macrons_determine_which_lemma_a_word_is() {
         let lessons = lessons(&[&[(Participant::Teacher, Language::Latin, "malae et mālae")]]);
         let index = WordIndex::from_project(&Default::default(), &lessons);
         let text = &lessons[0].entries[0].text;
@@ -427,7 +446,7 @@ mod tests {
         check(&mut search, "mālae", "mala", 4, &["malae", "mālae"]);
         check(&mut search, "malae", "malus", 0, &["malae"]);
 
-        // Optionally, unmarked vowels are short when a parse allows it.
+        // Optionally, unmarked vowels are short when a parse with them short exists.
         search.set_unmarked_short(true);
         assert!(matches!(
             search.mode(),
@@ -440,11 +459,11 @@ mod tests {
         // First-use labels follow the default rule.
         let mut first_uses = index.first_use_lemmas(0, 0);
         first_uses.sort();
-        assert_eq!(first_uses, ["māla", "mălus", "ĕt"]);
+        assert_eq!(first_uses, ["et", "malus", "māla"]);
     }
 
     #[test]
-    fn phrases_and_unknown_words_search_as_text() {
+    fn phrases_and_unknown_words_are_searched_as_text() {
         let mut search = Search::default();
         search.set_query("puella cantat".into());
         assert_eq!(search.mode(), SearchMode::Text);

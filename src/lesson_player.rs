@@ -8,7 +8,7 @@ use std::{
 use crate::{Lesson, project::AudioGaps};
 
 struct Plan {
-    clips: Vec<rodio::Decoder<Cursor<Arc<[u8]>>>>,
+    clips: Vec<crate::audio::ClipSource<Arc<[u8]>>>,
     gaps_ms: Vec<u32>,
     missing: Option<usize>,
 }
@@ -24,13 +24,13 @@ impl Plan {
                 missing = Some(index);
                 break;
             };
-            let decoder = crate::audio::wav_decoder(clip.clone())
+            let source = crate::audio::clip_source(clip.clone(), entry.trim)
                 .map_err(|e| format!("Entry {}: {e}", index + 1))?;
             if !clips.is_empty() {
                 gaps_ms
                     .push(gaps.between(lesson.entries[index - 1].participant, entry.participant));
             }
-            clips.push(decoder);
+            clips.push(source);
         }
         if clips.is_empty() {
             return Err(format!("Entry {} has no recording.", start + 1));
@@ -164,6 +164,7 @@ mod tests {
             language: Language::Latin,
             text: String::new(),
             audio: Some(clip()),
+            trim: None,
         })
         .collect();
         Lesson {
@@ -219,6 +220,29 @@ mod tests {
         );
         assert_eq!(current_index(7, 1, 1), 7);
         assert_eq!(current_index(7, 1, 0), 7);
+    }
+
+    #[test]
+    fn queued_playback_plays_only_the_cropped_part() {
+        let mut lesson = lesson();
+        lesson.entries.truncate(2);
+        lesson.entries[0].trim = Some(crate::Trim {
+            start: 100,
+            end: 340,
+        });
+        let (mixer, mut output) = rodio::mixer::mixer(
+            NonZeroU16::new(1).unwrap(),
+            NonZeroU32::new(48_000).unwrap(),
+        );
+        let player = rodio::Player::connect_new(&mixer);
+        Plan::new(&lesson, 0, AudioGaps::default())
+            .unwrap()
+            .enqueue(&player);
+        let samples: Vec<f32> = output.by_ref().take(240 + 4800 + 480).collect();
+        // Halfway through this 5 ms selection, the 10 ms cut fades are at 25%.
+        assert!(samples[120] > 0.005);
+        assert!(samples[240..5040].iter().all(|s| *s == 0.0));
+        assert!(samples[5040..].iter().all(|s| *s > 0.02));
     }
 
     #[test]

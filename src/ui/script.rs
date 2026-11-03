@@ -157,7 +157,7 @@ impl App {
         options
     }
 
-    /// Whether a lesson must be laid out even if it looks off-screen, so that
+    /// Whether a lesson must be laid out even if it appears off-screen, so that
     /// pending focus and scroll requests reach their widgets.
     fn lesson_must_render(&self, lesson: usize) -> bool {
         let in_lesson = |position: Option<Position>| position.is_some_and(|(l, _)| l == lesson);
@@ -215,7 +215,7 @@ impl App {
         self.focus_entry = None;
         self.scroll_to_entry = None;
         self.focus_name = None;
-        // Give up on centring after a while, e.g. if the entry is gone.
+        // Stop centring after a while, e.g. if the entry is gone.
         self.centre_entry = self
             .centre_entry
             .and_then(|(position, frames)| Some((position, frames.checked_sub(1)?)));

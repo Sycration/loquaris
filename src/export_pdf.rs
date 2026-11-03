@@ -813,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn export_folder_prefers_existing_saved_directory_and_falls_back() {
+    fn export_folder_uses_existing_saved_directory_and_falls_back() {
         let root = tempfile::tempdir().unwrap();
         let fallback = root.path();
         let folder = root.path().join("exports");
@@ -859,12 +859,14 @@ mod tests {
                     language: Language::L1,
                     text: "Teacher introduction".into(),
                     audio: None,
+                    trim: None,
                 },
                 Entry {
                     participant: Participant::Student,
                     language: Language::Latin,
                     text: format!("{} fīnis", "māter ".repeat(700)),
                     audio: None,
+                    trim: None,
                 },
             ],
         }];
@@ -911,6 +913,7 @@ mod tests {
                 language: Language::L1,
                 text: "\u{10ffff}".into(),
                 audio: None,
+                trim: None,
             }],
         };
         let error = save(
@@ -947,6 +950,7 @@ mod tests {
                 language: Language::Latin,
                 text: format!("Probe {} fīnis", "māter ".repeat(150)),
                 audio: None,
+                trim: None,
             }],
         }];
         let dir = tempfile::tempdir().unwrap();

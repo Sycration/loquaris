@@ -24,8 +24,8 @@ pub enum Command {
     SetAudio {
         lesson: usize,
         index: usize,
-        before: Option<std::sync::Arc<[u8]>>,
-        after: Option<std::sync::Arc<[u8]>>,
+        before: crate::AudioState,
+        after: crate::AudioState,
     },
     EditText {
         target: TextTarget,
@@ -257,7 +257,8 @@ impl App {
                 before,
                 after,
             } => {
-                self.lessons[lesson].entries[index].audio = if forward { after } else { before };
+                let entry = &mut self.lessons[lesson].entries[index];
+                (entry.audio, entry.trim) = if forward { after } else { before };
             }
             Command::EditText {
                 target,

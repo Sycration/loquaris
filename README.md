@@ -5,10 +5,11 @@ script of teacher and student lines, in Latin or the learner's own language,
 with recorded audio for each line.
 
 - Write and reorder lines, with undo and redo
-- Record or import audio for each line, and play a lesson back
+- Record or import audio for each line, see its waveform as you record, crop
+  it without losing the original, and play a lesson back
 - Mark vowel lengths automatically (auto-macronize)
 - Search the whole project for a word or any of its forms, see how often it is
-  used in each lesson, and find which words each lesson introduces
+  used in each lesson, and find which words first appear in each lesson
 - Export lessons as WAV audio and PDF scripts
 
 Latin parsing comes from `collo`, a Rust port of the
@@ -20,8 +21,8 @@ in the `collo` directory.
 You need a recent stable Rust toolchain (edition 2024, Rust 1.85 or newer),
 from [rustup](https://rustup.rs).
 
-On Linux, audio needs the ALSA, PipeWire and JACK development files, and
-Clang for generating the PipeWire bindings:
+On Linux, audio support requires the ALSA, PipeWire and JACK development files,
+and Clang for generating the PipeWire bindings:
 
 ```sh
 # Arch
@@ -32,7 +33,7 @@ sudo apt install libasound2-dev libpipewire-0.3-dev libjack-jackd2-dev \
     libclang-dev pkg-config
 ```
 
-macOS and Windows need nothing extra.
+No extra packages are required on macOS or Windows.
 
 Then build and run:
 

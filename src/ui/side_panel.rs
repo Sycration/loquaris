@@ -4,6 +4,7 @@
 //! lemmas new in the current lesson, a chart of uses per lesson, and the
 //! uses in the current lesson in context.
 use super::{Foreground, entry_font};
+use crate::macronize::reader_form;
 use crate::{
     Language, Lesson,
     app::App,
@@ -120,9 +121,9 @@ impl App {
         if ui
             .checkbox(&mut unmarked_short, "Unmarked vowels are short")
             .on_hover_text(
-                "Read a vowel without a macron as short when some parse allows it, \
-                 so “malae” is mălus, not māla. Off: only written macrons and \
-                 breves rule parses out.",
+                "Read a vowel without a macron as short when a parse with it short exists, \
+                 so “malae” is mălus, not māla. Off: parses are excluded only by \
+                 written macrons and breves.",
             )
             .changed()
         {
@@ -142,7 +143,9 @@ impl App {
                 n => format!("{n} uses"),
             };
             let what = match self.search.mode() {
-                SearchMode::Lemma(lemma) => format!("of the lemma {}", lemma.headword),
+                SearchMode::Lemma(lemma) => {
+                    format!("of the lemma {}", reader_form(lemma.headword))
+                }
                 SearchMode::Text => "of this text".to_owned(),
             };
             let across = match lessons {
@@ -160,10 +163,7 @@ impl App {
     fn analysis_section(&mut self, ui: &mut egui::Ui) {
         section_heading(ui, "Analysis");
         if self.search.is_empty() {
-            weak(
-                ui,
-                "Search for a word or phrase to see how Collo parses it.",
-            );
+            weak(ui, "Search for a word or phrase to analyze it");
             return;
         }
         let translation = search::translation_language(&self.l1_name);
@@ -191,7 +191,7 @@ impl App {
                     )
                     .on_hover_text(if self.search.unmarked_short() {
                         "Written macrons and breves must match, and unmarked vowels \
-                         are read as short when some reading allows it."
+                         are read as short when a reading with them short exists."
                     } else {
                         "Written macrons and breves must match."
                     });
@@ -205,7 +205,7 @@ impl App {
             for lemma in lemmas {
                 let mut heading = LayoutJob::default();
                 heading.append(
-                    lemma.headword,
+                    &reader_form(lemma.headword),
                     0.0,
                     TextFormat::simple(entry_font(Language::Latin, 15.0), Color32::WHITE),
                 );
@@ -239,10 +239,9 @@ impl App {
                     let likely = word.selected == Some(index);
                     let description = analysis.morphology(morphology).unwrap_or("");
                     let text = format!(
-                        "{}{}{} — {description}",
+                        "{}{} — {description}",
                         if likely { "★ " } else { "    " },
-                        analysis.form,
-                        analysis.suffix,
+                        reader_form(&format!("{}{}", analysis.form, analysis.suffix)),
                     );
                     let label = ui.label(RichText::new(text).size(12.0).color(if likely {
                         Color32::WHITE
@@ -250,7 +249,7 @@ impl App {
                         MUTED
                     }));
                     if likely {
-                        label.on_hover_text("Collo's most likely reading in context");
+                        label.on_hover_text("Most likely reading in context");
                     }
                 }
             }
@@ -273,7 +272,8 @@ impl App {
         let mut chosen = None;
         ui.horizontal_wrapped(|ui| {
             for lemma in lemmas {
-                let text = RichText::new(lemma.headword).font(entry_font(Language::Latin, 14.0));
+                let text = RichText::new(reader_form(lemma.headword))
+                    .font(entry_font(Language::Latin, 14.0));
                 let mut response = ui.selectable_label(mode == SearchMode::Lemma(lemma), text);
                 if let Some(meaning) = lemma.translation(translation) {
                     response = response.on_hover_text(meaning);
@@ -316,7 +316,7 @@ impl App {
         }
     }
 
-    /// Each entry of the current lesson that uses the search, with matches
+    /// Each entry of the current lesson that contains a search match, with matches
     /// highlighted and a button to jump to the entry in the script.
     fn contexts_section(&mut self, ui: &mut egui::Ui, hits: &[Hit], lesson: usize) {
         section_heading(ui, &format!("Contexts in lesson {}", lesson + 1));
@@ -375,7 +375,7 @@ fn uses_chart(
     counts: &[[usize; 2]],
     current: usize,
 ) -> Option<usize> {
-    // Both halves share one scale so their bars compare directly.
+    // Both halves share one scale so their bars can be compared directly.
     let max = counts.iter().flatten().copied().max().unwrap_or(0);
     let axis_width = 26.0;
     let (rect, response) = ui.allocate_exact_size(

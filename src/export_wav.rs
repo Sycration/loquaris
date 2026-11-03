@@ -151,6 +151,10 @@ pub fn save(
                         }
                     }
                     previous = Some(entry.participant);
+                    let total = (samples.len() / channels) as u32;
+                    let selected = crate::audio::selected_frames(entry.trim, total);
+                    let first = selected.start as usize;
+                    let samples = &samples[first * channels..selected.end as usize * channels];
                     let frames = samples.len() / channels;
                     let output_frames = (frames as u64 * u64::from(RATE)
                         + u64::from(spec.sample_rate) / 2)
@@ -164,6 +168,12 @@ pub fn save(
                         let a = (pos as usize).min(frames - 1);
                         let b = (a + 1).min(frames - 1);
                         let fraction = (pos - a as f64) as f32;
+                        let gain = crate::audio::cut_gain(
+                            (first + a) as u32,
+                            &selected,
+                            total,
+                            spec.sample_rate,
+                        );
                         for channel in 0..2 {
                             let mix = |frame: usize| {
                                 if channels <= 2 {
@@ -185,7 +195,7 @@ pub fn save(
                                 }
                             };
                             let value = if enabled {
-                                mix(a) * (1.0 - fraction) + mix(b) * fraction
+                                (mix(a) * (1.0 - fraction) + mix(b) * fraction) * gain
                             } else {
                                 0.0
                             };
@@ -239,12 +249,14 @@ mod tests {
                         language: Language::L1,
                         text: String::new(),
                         audio: Some(clip(8000, 1, 12000)),
+                        trim: None,
                     },
                     Entry {
                         participant: Participant::Student,
                         language: Language::Latin,
                         text: String::new(),
                         audio: Some(clip(16000, 2, -12000)),
+                        trim: None,
                     },
                 ],
             },
@@ -256,6 +268,7 @@ mod tests {
                     language: Language::Latin,
                     text: String::new(),
                     audio: Some(clip(48000, 1, 6000)),
+                    trim: None,
                 }],
             },
         ]
@@ -294,6 +307,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hound::WavReader::open(&path).unwrap().duration(), RATE);
+    }
+
+    #[test]
+    fn exports_only_the_selected_part_with_faded_cuts() {
+        // One second at 48 kHz, cropped to the half second starting at 0.25 s.
+        let mut lessons = lessons();
+        lessons[1].entries[0].trim = Some(crate::Trim {
+            start: 12_000,
+            end: 36_000,
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cropped.wav");
+        save(
+            &path,
+            &lessons[1..],
+            true,
+            true,
+            crate::project::AudioGaps::default(),
+        )
+        .unwrap();
+        let reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!(reader.duration(), 24_000);
+        let samples: Vec<i16> = reader.into_samples::<i16>().map(Result::unwrap).collect();
+        assert_eq!(samples[0], 0);
+        assert!((5990..=6000).contains(&samples[24_000]));
+        assert!(samples[samples.len() - 1].abs() < 20);
     }
 
     #[test]
@@ -377,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn participant_gaps_follow_settings_even_when_muted() {
+    fn participant_gaps_use_settings_even_when_muted() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gaps.wav");
         let mut lessons = lessons();

@@ -81,6 +81,7 @@ impl App {
             .map_or(lesson.entries.len(), |(_, entry)| entry + 1);
         let entry = Entry {
             audio: None,
+            trim: None,
             participant,
             language,
             text: String::new(),

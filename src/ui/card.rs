@@ -70,7 +70,7 @@ pub fn card(
     selected: bool,
     editing: bool,
     options: EntryMenuOptions,
-    first_lemmas: &[&str],
+    first_lemmas: &[String],
     // Search matches to highlight, as sorted byte ranges of the text.
     highlights: &[std::ops::Range<usize>],
 ) -> CardResponse {
@@ -261,7 +261,7 @@ fn paint_first_lemmas(
     rect: egui::Rect,
     participant: Participant,
     hovered: bool,
-    lemmas: &[&str],
+    lemmas: &[String],
 ) {
     let (position, alignment) = match participant {
         Participant::Teacher => (
