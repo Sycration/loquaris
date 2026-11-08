@@ -20,7 +20,8 @@ pub struct Editor {
     selected: usize,
     recording: Option<Recording>,
     clip: Option<Arc<[u8]>>,
-    error: Option<String>,
+    /// Messages shown in the recorder window.
+    pub toasts: crate::toasts::Toasts,
     playback: Option<(rodio::MixerDeviceSink, rodio::Player)>,
     position: f64,
     duration: f64,
@@ -361,7 +362,7 @@ impl Editor {
             inputs: Vec::new(),
             selected: 0,
             recording: None,
-            error: None,
+            toasts: Default::default(),
             playback: None,
             position: 0.0,
             duration: 0.0,
@@ -428,7 +429,7 @@ impl Editor {
             inputs,
             selected,
             recording: None,
-            error,
+            toasts: Default::default(),
             playback: None,
             position: 0.0,
             duration: 0.0,
@@ -440,6 +441,9 @@ impl Editor {
             last_capture: None,
         };
         editor.set_clip(clip, trim);
+        if let Some(error) = error {
+            editor.toasts.error(error);
+        }
         editor
     }
 
@@ -556,13 +560,12 @@ impl Editor {
         self.selected = 0;
         let Some(system) = self.systems.get(self.selected_system).copied() else {
             self.inputs.clear();
-            self.error = Some("No audio systems are available.".into());
+            self.toasts.error("No audio systems are available.");
             return;
         };
         match crate::audio_devices::inputs(system) {
             Ok(inputs) => {
                 self.inputs = inputs;
-                self.error = None;
                 self.log(format!("{system}: {} inputs found", self.inputs.len()));
                 for input in self.inputs.clone() {
                     self.log(format!("  {} ({:?})", input.label, input.id));
@@ -571,7 +574,7 @@ impl Editor {
             Err(error) => {
                 self.inputs.clear();
                 self.log(error.clone());
-                self.error = Some(error);
+                self.toasts.error(error);
             }
         }
     }
@@ -709,8 +712,11 @@ impl Editor {
             "Recording stopped. {}",
             self.last_capture.as_ref().unwrap().summary()
         ));
+        // Check for errors before dropping the stream: cpal's PipeWire backend reports
+        // "Device disconnected" while tearing down streams on non-default devices.
+        let error = recording.error.lock().map_err(|e| e.to_string())?.take();
         drop(recording.stream);
-        if let Some(error) = recording.error.lock().map_err(|e| e.to_string())?.take() {
+        if let Some(error) = error {
             return Err(error);
         }
         let mut samples = recording.samples.lock().map_err(|e| e.to_string())?;
@@ -756,15 +762,6 @@ impl Editor {
         self.original = entry.clone();
     }
 
-    pub fn block_history_while_recording(&mut self) -> bool {
-        if self.recording.is_some() {
-            self.error = Some("Stop recording before undo or redo.".into());
-            true
-        } else {
-            false
-        }
-    }
-
     fn seek(&mut self, position: f64) {
         if self.recording.is_some() || self.clip.is_none() {
             return;
@@ -773,7 +770,7 @@ impl Editor {
         let position = position.clamp(start, end);
         if let Some((_, player)) = &self.playback {
             if let Err(error) = player.try_seek(std::time::Duration::from_secs_f64(position)) {
-                self.error = Some(format!("Could not seek audio: {error}"));
+                self.toasts.error(format!("Could not seek audio: {error}"));
                 return;
             }
         }
@@ -790,7 +787,7 @@ impl Editor {
         match action {
             Action::Undo | Action::Redo | Action::RedoAlternative => {
                 if self.recording.is_some() {
-                    self.error = Some("Stop recording before undo or redo.".into());
+                    self.toasts.error("Stop recording before undo or redo.");
                 } else {
                     project_actions.push(action);
                 }
@@ -800,7 +797,8 @@ impl Editor {
                     match self.stop() {
                         Ok(()) => *changed = Some(self.audio_state()),
                         Err(error) => {
-                            self.error = Some(format!("Could not finish recording: {error}"));
+                            self.toasts
+                                .error(format!("Could not finish recording: {error}"));
                             return;
                         }
                     }
@@ -812,12 +810,14 @@ impl Editor {
                     match self.stop() {
                         Ok(()) => {
                             *changed = Some(self.audio_state());
-                            self.error = None;
                         }
-                        Err(error) => self.error = Some(format!("Recording error: {error}")),
+                        Err(error) => self.toasts.error(format!("Recording error: {error}")),
                     }
                 } else if !self.inputs.is_empty() {
-                    self.error = self.start().err();
+                    if let Err(error) = self.start() {
+                        self.log(format!("Could not start recording: {error}"));
+                        self.toasts.error(error);
+                    }
                 }
             }
             Action::RecorderPlayPause if self.recording.is_none() && self.clip.is_some() => {
@@ -828,7 +828,9 @@ impl Editor {
                         player.pause();
                     }
                 } else {
-                    self.error = self.play().err();
+                    if let Err(error) = self.play() {
+                        self.toasts.error(error);
+                    }
                 }
             }
             Action::RecorderStopPlayback if self.recording.is_none() => {
@@ -867,7 +869,7 @@ impl Editor {
                 let summary = self.last_capture.as_ref().unwrap().summary();
                 self.recording = None;
                 self.log(format!("Stream error: {error}. {summary}"));
-                self.error = Some(error);
+                self.toasts.error(error);
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
@@ -957,12 +959,12 @@ impl Editor {
                                     Ok(clip) => {
                                         self.set_clip(Some(clip), None);
                                         result = Some(self.audio_state());
-                                        self.error = None;
                                         self.log("WAV import succeeded.");
+                                        self.toasts.success("Imported the WAV file.");
                                     }
                                     Err(e) => {
                                         self.log(format!("WAV import failed: {e}"));
-                                        self.error = Some(format!("Could not import audio: {e}"))
+                                        self.toasts.error(format!("Could not import audio: {e}"))
                                     }
                                 }
                             }
@@ -997,13 +999,9 @@ impl Editor {
                         let symbol = if recording { "■" } else { "●" };
                         if ui.add_enabled(recording || !self.inputs.is_empty(), egui::Button::new(egui::RichText::new(symbol).size(27.0).color(egui::Color32::RED))).on_hover_text(if recording { "Stop recording" } else { "Record" }).clicked() {
                             self.handle_action(crate::keybinds::Action::RecorderRecord, &mut result, &mut project_actions);
-                            if let Some(error) = self.error.clone() { self.log(format!("Recording error: {error}")); }
                         }
                     });
                 });
-                if let Some(error) = &self.error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
-                }
                 egui::CollapsingHeader::new("Audio diagnostics")
                     .default_open(false)
                     .show(ui, |ui| {
@@ -1050,6 +1048,7 @@ impl Editor {
                 show_entry_context(ui, &self.original, l1_name);
                 });
                 });
+                self.toasts.show(ui.ctx());
             },
         );
         if cancel {
@@ -1058,7 +1057,7 @@ impl Editor {
                     Ok(()) => result = Some(self.audio_state()),
                     Err(error) => {
                         self.log(format!("Stop failed: {error}"));
-                        self.error = Some(error);
+                        self.toasts.error(error);
                         ctx.send_viewport_cmd_to(
                             egui::ViewportId::from_hash_of("entry-audio"),
                             egui::ViewportCommand::CancelClose,
@@ -1237,6 +1236,7 @@ mod tests {
             text: "salvē".into(),
             audio: Some(b"clip".as_slice().into()),
             trim: None,
+            lemmas: Vec::new(),
         };
         let mut editor = Editor::for_test((0, 0), entry);
         editor.duration = 12.0;
@@ -1266,6 +1266,7 @@ mod tests {
             text: "salvē".into(),
             audio: None,
             trim: None,
+            lemmas: Vec::new(),
         };
         let mut editor = Editor::for_test((0, 0), entry);
         let ctx = egui::Context::default();
@@ -1378,6 +1379,7 @@ mod tests {
             text: String::new(),
             audio: Some(test_clip(1000, 1, 10_000)),
             trim: None,
+            lemmas: Vec::new(),
         };
         let mut editor = Editor::for_test((0, 0), entry);
         assert_eq!(editor.selection(), (0.0, 10.0));
@@ -1424,6 +1426,7 @@ mod tests {
             text: String::new(),
             audio: Some(clip.clone()),
             trim,
+            lemmas: Vec::new(),
         };
         let mut editor = Editor::for_test((0, 0), entry.clone());
         assert_eq!(editor.position, 0.1);

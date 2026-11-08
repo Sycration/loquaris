@@ -472,6 +472,7 @@ impl App {
                     entry,
                     &text,
                     value.language,
+                    &value.lemmas,
                 );
             }
         }

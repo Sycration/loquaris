@@ -50,14 +50,6 @@ impl App {
         self.project_open && self.current_history_token() != self.saved_history_token
     }
 
-    pub fn show_file_error(message: &str) {
-        rfd::MessageDialog::new()
-            .set_title("Project file error")
-            .set_description(message)
-            .set_level(rfd::MessageLevel::Error)
-            .show();
-    }
-
     /// Ask for a destination, confirming before replacing a file the dialog
     /// couldn't warn about because the extension was added afterwards.
     fn choose_save_path(&self) -> Option<PathBuf> {
@@ -97,12 +89,17 @@ impl App {
         match project.save(&path) {
             Ok(()) => {
                 self.recent_projects.record(&path, &project.name);
+                let name = path
+                    .file_name()
+                    .unwrap_or(path.as_os_str())
+                    .to_string_lossy();
+                self.messages().success(format!("Saved {name}"));
                 self.project_path = Some(path);
                 self.saved_history_token = self.current_history_token();
                 true
             }
             Err(error) => {
-                Self::show_file_error(&error);
+                self.messages().error(error);
                 false
             }
         }
@@ -167,7 +164,7 @@ impl App {
                 self.replace_project(project, Some(path));
                 ui::surrender_focus(ctx);
             }
-            Err(error) => Self::show_file_error(&error),
+            Err(error) => self.messages().error(error),
         }
     }
 

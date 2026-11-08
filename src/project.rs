@@ -4,7 +4,7 @@ use std::{io::Write, path::Path};
 use crate::{Language, Lesson, Participant};
 
 const MAGIC: &[u8; 8] = b"LOQUARIS";
-const ARCHIVE_VERSION: u32 = 4;
+const ARCHIVE_VERSION: u32 = 5;
 const HEADER_SIZE: usize = 16;
 
 // This schema is fixed for archive version 1. rkyv is configured for little
@@ -42,6 +42,27 @@ struct DiskProjectV4 {
     word_cache: crate::word_index::PersistedCache,
     /// Only the cropped entries.
     trims: Vec<DiskTrim>,
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct DiskProjectV5 {
+    project: DiskProject,
+    same_participant_ms: u32,
+    different_participant_ms: u32,
+    word_cache: crate::word_index::PersistedCache,
+    /// Only the cropped entries.
+    trims: Vec<DiskTrim>,
+    lemma_choices: Vec<DiskLemmaChoice>,
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct DiskLemmaChoice {
+    lesson: u32,
+    entry: u32,
+    token: String,
+    occurrence: u32,
+    lemma_key: String,
+    extension: bool,
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -214,12 +235,13 @@ impl Project {
         }
         let mut aligned = rkyv::util::AlignedVec::<16>::new();
         aligned.extend_from_slice(&bytes[HEADER_SIZE..]);
-        let (disk, gaps, word_cache, trims) = match version {
+        let (disk, gaps, word_cache, trims, lemma_choices) = match version {
             1 => (
                 rkyv::from_bytes::<DiskProject, rkyv::rancor::Error>(&aligned)
                     .map_err(|error| format!("Invalid project archive: {error}"))?,
                 AudioGaps::default(),
                 crate::word_index::PersistedCache::default(),
+                Vec::new(),
                 Vec::new(),
             ),
             2 => {
@@ -232,6 +254,7 @@ impl Project {
                         different_participant_ms: disk.different_participant_ms,
                     },
                     crate::word_index::PersistedCache::default(),
+                    Vec::new(),
                     Vec::new(),
                 )
             }
@@ -246,6 +269,7 @@ impl Project {
                     },
                     disk.word_cache,
                     Vec::new(),
+                    Vec::new(),
                 )
             }
             4 => {
@@ -259,12 +283,40 @@ impl Project {
                     },
                     disk.word_cache,
                     disk.trims,
+                    Vec::new(),
+                )
+            }
+            5 => {
+                let disk = rkyv::from_bytes::<DiskProjectV5, rkyv::rancor::Error>(&aligned)
+                    .map_err(|error| format!("Invalid project archive: {error}"))?;
+                (
+                    disk.project,
+                    AudioGaps {
+                        same_participant_ms: disk.same_participant_ms,
+                        different_participant_ms: disk.different_participant_ms,
+                    },
+                    disk.word_cache,
+                    disk.trims,
+                    disk.lemma_choices,
                 )
             }
             _ => unreachable!(),
         };
         let mut project = Self::from_disk(disk, word_cache)?;
         project.audio_gaps = gaps;
+        for choice in lemma_choices {
+            let entry = project
+                .lessons
+                .get_mut(choice.lesson as usize)
+                .and_then(|lesson| lesson.entries.get_mut(choice.entry as usize))
+                .ok_or("Invalid lemma choice in project archive.")?;
+            entry.lemmas.push(crate::word_index::LemmaChoice {
+                token: choice.token,
+                occurrence: choice.occurrence,
+                lemma_key: choice.lemma_key,
+                extension: choice.extension,
+            });
+        }
         for trim in trims {
             let entry = project
                 .lessons
@@ -283,12 +335,13 @@ impl Project {
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
         self.validate()?;
-        let disk = DiskProjectV4 {
+        let disk = DiskProjectV5 {
             project: self.to_disk()?,
             same_participant_ms: self.audio_gaps.same_participant_ms,
             different_participant_ms: self.audio_gaps.different_participant_ms,
             word_cache: self.word_cache.clone(),
             trims: self.disk_trims(),
+            lemma_choices: self.disk_lemma_choices(),
         };
         let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&disk)
             .map_err(|error| format!("Could not serialize project: {error}"))?;
@@ -307,6 +360,25 @@ impl Project {
         file.persist(path)
             .map_err(|error| format!("Could not save {}: {}", path.display(), error.error))?;
         Ok(())
+    }
+
+    fn disk_lemma_choices(&self) -> Vec<DiskLemmaChoice> {
+        let mut choices = Vec::new();
+        for (lesson_index, lesson) in self.lessons.iter().enumerate() {
+            for (entry_index, entry) in lesson.entries.iter().enumerate() {
+                for choice in &entry.lemmas {
+                    choices.push(DiskLemmaChoice {
+                        lesson: lesson_index as u32,
+                        entry: entry_index as u32,
+                        token: choice.token.clone(),
+                        occurrence: choice.occurrence,
+                        lemma_key: choice.lemma_key.clone(),
+                        extension: choice.extension,
+                    });
+                }
+            }
+        }
+        choices
     }
 
     fn disk_trims(&self) -> Vec<DiskTrim> {
@@ -406,6 +478,7 @@ impl Project {
                     text: entry.text,
                     audio: entry.audio.map(Into::into),
                     trim: None,
+                    lemmas: Vec::new(),
                 });
             }
             lessons.push(Lesson {
@@ -445,6 +518,7 @@ mod tests {
                             participant: Participant::Teacher,
                             language: Language::L1,
                             text: "A \"hand\"\nwith a newline".into(),
+                            lemmas: Vec::new(),
                         },
                         Entry {
                             audio: None,
@@ -452,6 +526,7 @@ mod tests {
                             participant: Participant::Student,
                             language: Language::Latin,
                             text: "duae manūs".into(),
+                            lemmas: Vec::new(),
                         },
                     ],
                 },
@@ -495,11 +570,12 @@ mod tests {
         assert_eq!(Project::load(&path).unwrap(), project);
 
         for (entry, start, end) in [(9, 5, 90), (1, 90, 5)] {
-            let disk = DiskProjectV4 {
+            let disk = DiskProjectV5 {
                 project: project.to_disk().unwrap(),
                 same_participant_ms: 100,
                 different_participant_ms: 500,
                 word_cache: crate::word_index::PersistedCache::default(),
+                lemma_choices: Vec::new(),
                 trims: vec![DiskTrim {
                     lesson: 0,
                     entry,
@@ -529,6 +605,12 @@ mod tests {
             &project.lessons,
         )
         .persisted_cache();
+        project.lessons[0].entries[0].lemmas = vec![crate::word_index::LemmaChoice {
+            token: "bellum".into(),
+            occurrence: 1,
+            lemma_key: "bellus".into(),
+            extension: false,
+        }];
         project.save(&path).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.starts_with(MAGIC));

@@ -13,7 +13,6 @@ impl App {
             return;
         }
         self.lesson_playback = None;
-        self.playback_error = None;
         let start = self
             .selected_entry
             .filter(|(li, _)| *li == lesson)
@@ -25,7 +24,7 @@ impl App {
                 self.lessons[lesson].expanded = true;
                 self.lesson_playback = Some(player);
             }
-            Err(error) => self.playback_error = Some(error),
+            Err(error) => self.messages().error(error),
         }
     }
 
@@ -54,7 +53,9 @@ impl App {
         }
         if finished {
             self.lesson_playback = None;
-            self.playback_error = error;
+            if let Some(error) = error {
+                self.toasts.error(error);
+            }
         } else if !paused {
             ctx.request_repaint_after(std::time::Duration::from_millis(25));
         }

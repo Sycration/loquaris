@@ -13,6 +13,7 @@ mod parsing_review;
 mod project;
 mod recent_projects;
 mod search;
+mod toasts;
 mod ui;
 mod waveform;
 mod word_index;
@@ -39,5 +40,7 @@ fn main() -> eframe::Result {
     )
 }
 
+#[cfg(test)]
+mod profile;
 #[cfg(test)]
 mod tests;

@@ -94,7 +94,10 @@ impl Settings {
 
 pub struct Window {
     pub open: bool,
-    error: Option<String>,
+    /// Messages shown in the export window.
+    pub toasts: crate::toasts::Toasts,
+    /// What was exported, for the main window to report since this one closes.
+    pub exported: Option<String>,
     wav: bool,
     lesson: Option<usize>,
     teacher: bool,
@@ -106,7 +109,8 @@ impl Default for Window {
     fn default() -> Self {
         Self {
             open: false,
-            error: None,
+            toasts: Default::default(),
+            exported: None,
             wav: false,
             lesson: None,
             teacher: true,
@@ -231,9 +235,6 @@ impl Window {
                         });
                     }
                     ui.add_space(12.0);
-                    if let Some(error) = &self.error {
-                        ui.colored_label(egui::Color32::LIGHT_RED, error);
-                    }
                     ui.horizontal(|ui| {
                         if ui.button("Undo").clicked() {
                             actions.push(crate::keybinds::Action::Undo);
@@ -264,7 +265,7 @@ impl Window {
                                         .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c))
                                     || folder.ends_with([' ', '.'])
                                 {
-                                    self.error = Some("Enter a valid folder name.".into());
+                                    self.toasts.error("Enter a valid folder name.");
                                     return;
                                 }
                                 let mut dialog = rfd::FileDialog::new()
@@ -284,10 +285,13 @@ impl Window {
                                     ) {
                                         Ok(()) => {
                                             settings.record_export(&destination);
-                                            self.error = None;
+                                            self.exported = Some(format!(
+                                                "Exported audio to {}",
+                                                destination.display()
+                                            ));
                                             self.open = false;
                                         }
-                                        Err(error) => self.error = Some(error),
+                                        Err(error) => self.toasts.error(error),
                                     }
                                 }
                                 return;
@@ -328,9 +332,8 @@ impl Window {
                                             .is_some_and(|(a, b)| a == b))
                                 });
                                 if same_project {
-                                    self.error = Some(
-                                        "Choose a different file from the open project.".into(),
-                                    );
+                                    self.toasts
+                                        .error("Choose a different file from the open project.");
                                     return;
                                 }
                                 let result = save(
@@ -344,10 +347,11 @@ impl Window {
                                 match result {
                                     Ok(()) => {
                                         settings.record_export(&path);
-                                        self.error = None;
+                                        self.exported =
+                                            Some(format!("Exported {}", path.display()));
                                         self.open = false;
                                     }
-                                    Err(error) => self.error = Some(error),
+                                    Err(error) => self.toasts.error(error),
                                 }
                             }
                         }
@@ -356,6 +360,7 @@ impl Window {
                         }
                     });
                 });
+                self.toasts.show(ui.ctx());
                 if !actions.is_empty() {
                     ui.ctx().memory_mut(|memory| {
                         if let Some(id) = memory.focused() {
@@ -729,7 +734,8 @@ fn build(
         let title: String = format!("Lesson {}: {}", index + 1, lesson.name)
             .nfc()
             .collect();
-        if layout.y + 70.0 * layout.scale > layout.height - MARGIN {
+        // Every lesson starts at the top of a page.
+        if index > 0 {
             layout.new_page();
         }
         layout.lesson_header(&title, false);
@@ -860,6 +866,7 @@ mod tests {
                     text: "Teacher introduction".into(),
                     audio: None,
                     trim: None,
+                    lemmas: Vec::new(),
                 },
                 Entry {
                     participant: Participant::Student,
@@ -867,6 +874,7 @@ mod tests {
                     text: format!("{} fīnis", "māter ".repeat(700)),
                     audio: None,
                     trim: None,
+                    lemmas: Vec::new(),
                 },
             ],
         }];
@@ -901,6 +909,51 @@ mod tests {
     }
 
     #[test]
+    fn each_lesson_starts_on_a_new_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lessons.pdf");
+        let lesson = |name: &str| Lesson {
+            name: name.into(),
+            expanded: true,
+            entries: vec![Entry {
+                participant: Participant::Teacher,
+                language: Language::Latin,
+                text: format!("Salvē, {name}"),
+                audio: None,
+                trim: None,
+                lemmas: Vec::new(),
+            }],
+        };
+        let lessons = [lesson("Prīma"), lesson("Secunda"), lesson("Tertia")];
+        save(
+            &path,
+            "Course",
+            "English",
+            &lessons,
+            Paper::A4,
+            DEFAULT_FONT_SIZE,
+        )
+        .unwrap();
+        let Ok(output) = std::process::Command::new("pdftotext")
+            .arg(&path)
+            .arg("-")
+            .output()
+        else {
+            return;
+        };
+        let text = String::from_utf8(output.stdout).unwrap();
+        let pages: Vec<_> = text
+            .split('\u{c}')
+            .filter(|page| !page.trim().is_empty())
+            .collect();
+        assert_eq!(pages.len(), 3, "{text}");
+        for (page, name) in pages.iter().zip(["Prīma", "Secunda", "Tertia"]) {
+            assert!(page.contains(&format!("Salvē, {name}")), "{page}");
+            assert_eq!(page.matches("Lesson ").count(), 2, "{page}");
+        }
+    }
+
+    #[test]
     fn export_rejects_missing_glyphs_without_overwriting_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("existing.pdf");
@@ -914,6 +967,7 @@ mod tests {
                 text: "\u{10ffff}".into(),
                 audio: None,
                 trim: None,
+                lemmas: Vec::new(),
             }],
         };
         let error = save(
@@ -951,6 +1005,7 @@ mod tests {
                 text: format!("Probe {} fīnis", "māter ".repeat(150)),
                 audio: None,
                 trim: None,
+                lemmas: Vec::new(),
             }],
         }];
         let dir = tempfile::tempdir().unwrap();

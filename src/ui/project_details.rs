@@ -1,5 +1,5 @@
 //! The project details window: name, L1 language, and playback gaps.
-use crate::app::{App, Command, FileAction, TextTarget};
+use crate::app::{App, Command, FileAction, Origin, TextTarget};
 use eframe::egui::{self, RichText};
 
 impl App {
@@ -19,7 +19,9 @@ impl App {
                     self.project_details_open = false;
                     return;
                 }
-                if let Some(action) = self.handle_shortcuts(ui) {
+                if let Some(action) =
+                    self.from_origin(Origin::Details, |app| app.handle_shortcuts(ui))
+                {
                     file_action = Some(action);
                 }
                 egui::Frame::new().inner_margin(12.0).show(ui, |ui| {
@@ -34,6 +36,7 @@ impl App {
                             .show(ui, |ui| self.details_table(ui, column_width));
                     });
                 });
+                self.details_toasts.show(ui.ctx());
             },
         );
         file_action

@@ -38,6 +38,7 @@ fn lesson_recording_summary_counts_clips_and_gaps() {
         text: String::new(),
         audio,
         trim: None,
+        lemmas: Vec::new(),
     };
     let mut lesson = Lesson {
         name: "First".into(),
@@ -166,6 +167,7 @@ fn sample_app() -> App {
         participant,
         language,
         text: text.into(),
+        lemmas: Vec::new(),
     })
     .collect();
     let project = project::Project::new(
@@ -417,6 +419,7 @@ fn audio_marker_is_only_shown_on_the_inner_side_of_attached_entries() {
         text: String::new(),
         audio: None,
         trim: None,
+        lemmas: Vec::new(),
     };
     assert!(audio_marker_rect(rect, &entry).is_none());
     entry.audio = Some(b"clip".as_slice().into());
@@ -451,6 +454,7 @@ fn entry_markers_remain_outside_the_center_scrollbar() {
             text: String::new(),
             audio: Some(b"clip".as_slice().into()),
             trim: None,
+            lemmas: Vec::new(),
         };
         let marker = audio_marker_rect(rect, &entry).unwrap();
         if participant == Participant::Teacher {
@@ -544,6 +548,7 @@ fn multiselection_modifiers_and_anchor_work_across_lessons() {
                 participant: Participant::Student,
                 language: Language::Latin,
                 text: "one".into(),
+                lemmas: Vec::new(),
             },
             Entry {
                 audio: None,
@@ -551,6 +556,7 @@ fn multiselection_modifiers_and_anchor_work_across_lessons() {
                 participant: Participant::Student,
                 language: Language::Latin,
                 text: "two".into(),
+                lemmas: Vec::new(),
             },
         ],
     });
@@ -697,6 +703,7 @@ fn contiguous_groups_move_across_boundaries_without_reordering() {
                 participant: Participant::Student,
                 language: Language::Latin,
                 text: "6".into(),
+                lemmas: Vec::new(),
             },
             Entry {
                 audio: None,
@@ -704,6 +711,7 @@ fn contiguous_groups_move_across_boundaries_without_reordering() {
                 participant: Participant::Student,
                 language: Language::Latin,
                 text: "7".into(),
+                lemmas: Vec::new(),
             },
         ],
     });
@@ -783,6 +791,7 @@ fn entry_display_and_editor_have_matching_geometry() {
             participant: Participant::Teacher,
             language,
             text: text.into(),
+            lemmas: Vec::new(),
         };
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -962,6 +971,7 @@ fn auto_macronizing_is_latin_only_and_undoable() {
     assert!(app.entry_action(0, 1, EntryAction::AutoMacronize));
     assert!(app.parsing_review.is_none());
     assert_eq!(app.lessons[0].entries[1].text, "Puellās, puellās!");
+    eprintln!("DBG {:?}", app.lessons[0].entries[1].text);
     assert!(!app.entry_action(0, 1, EntryAction::AutoMacronize));
     app.undo();
     assert_eq!(app.lessons[0].entries[1].text, "Puellas, puellas!");
@@ -982,6 +992,79 @@ fn applying_review_is_undoable_and_refuses_stale_text() {
     assert_eq!(app.lessons[0].entries[1].text, "puellās");
     app.apply_review(&review, "other".into());
     assert_eq!(app.lessons[0].entries[1].text, "puellās");
+}
+
+#[test]
+fn reviewed_lemmas_belong_to_each_occurrence_and_are_saved_and_undoable() {
+    let mut app = sample_app();
+    let sentence = "Dum bellum geritur, pilum bellum feret miles.";
+    app.lessons[0].entries[1].text = sentence.into();
+    app.lessons[0].entries[3].text = "bellum".into();
+    app.word_index.rebuild(&app.lessons);
+    let choice = |occurrence, lemma_key: &str| word_index::LemmaChoice {
+        token: "bellum".into(),
+        occurrence,
+        lemma_key: lemma_key.into(),
+        extension: false,
+    };
+    let new_keys = |app: &App| -> Vec<&str> {
+        app.word_index
+            .new_lemmas_in_lesson(0)
+            .iter()
+            .map(|lemma| lemma.key)
+            .collect()
+    };
+    let hits_in_sentence = |app: &App, lemma_key| -> Vec<usize> {
+        app.word_index
+            .lemma_occurrences(lemma_key, false)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|hit| hit.entry == 1)
+            .map(|hit| hit.range.start)
+            .collect()
+    };
+    let positions = |text: &str| (text.find("bellum").unwrap(), text.rfind("bellum").unwrap());
+
+    // Spelled alike, so only the lemma is in question; still ask.
+    assert!(app.entry_action(0, 1, EntryAction::AutoMacronize));
+    assert!(app.parsing_review.take().is_some());
+    let mut review = parsing_review::Review::new(0, 1, sentence.into());
+    review.prefer_lemmas(&[choice(0, "bellum"), choice(1, "bellus")]);
+    app.apply_review(&review, review.preview());
+    let lemmas = app.lessons[0].entries[1].lemmas.clone();
+    let (war, pretty) = positions(&app.lessons[0].entries[1].text);
+    assert!(lemmas.contains(&choice(0, "bellum")));
+    assert!(lemmas.contains(&choice(1, "bellus")));
+    assert_eq!(hits_in_sentence(&app, "bellum"), [war]);
+    assert_eq!(hits_in_sentence(&app, "bellus"), [pretty]);
+    assert!(new_keys(&app).contains(&"bellum"));
+    assert!(new_keys(&app).contains(&"bellus"));
+
+    // Reviewing the entry again starts from its choices.
+    let mut again = parsing_review::Review::new(0, 1, app.lessons[0].entries[1].text.clone());
+    again.prefer_lemmas(&app.lessons[0].entries[1].lemmas);
+    assert_eq!(again.lemma_choices(), lemmas);
+    // Another entry's bellum is its own word, so it is asked about.
+    assert!(app.entry_action(0, 3, EntryAction::AutoMacronize));
+    assert!(app.parsing_review.take().is_some());
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lemmas.loqr");
+    app.project_snapshot_for_save().save(&path).unwrap();
+    let loaded = project::Project::load(&path).unwrap();
+    assert_eq!(loaded.lessons[0].entries[1].lemmas, lemmas);
+
+    app.undo();
+    assert_eq!(app.lessons[0].entries[1].text, sentence);
+    assert!(app.lessons[0].entries[1].lemmas.is_empty());
+    let (before_war, before_pretty) = positions(sentence);
+    assert_eq!(
+        hits_in_sentence(&app, "bellus"),
+        [before_war, before_pretty]
+    );
+    app.redo();
+    assert_eq!(app.lessons[0].entries[1].lemmas, lemmas);
+    assert_eq!(hits_in_sentence(&app, "bellus"), [pretty]);
 }
 
 #[test]
@@ -1024,6 +1107,7 @@ fn moving_entries_crosses_lesson_boundaries_and_undoes() {
             participant: Participant::Student,
             language: Language::Latin,
             text: "next".into(),
+            lemmas: Vec::new(),
         }],
         expanded: false,
     });
@@ -1430,6 +1514,7 @@ fn going_to_an_entry_centres_it_in_the_script() {
             participant: Participant::Teacher,
             language: Language::L1,
             text: format!("Line {n}"),
+            lemmas: Vec::new(),
         })
         .collect();
     app.lessons[0].entries = entries;
@@ -1524,4 +1609,39 @@ fn going_to_an_entry_in_the_large_project() {
             "{target:?} centred: {centre}"
         );
     }
+}
+
+#[test]
+fn messages_appear_in_the_window_the_action_came_from() {
+    use crate::{app::Origin, toasts::Level};
+    let mut app = sample_app();
+    let dir = tempfile::tempdir().unwrap();
+    app.project_path = Some(dir.path().join("missing").join("course.loqr"));
+    assert!(!app.save_project(false));
+    assert_eq!(app.toasts.messages().len(), 1);
+    assert_eq!(app.toasts.messages()[0].0, Level::Error);
+
+    app.project_details_open = true;
+    app.project_path = Some(dir.path().join("course.loqr"));
+    assert!(app.from_origin(Origin::Details, |app| app.save_project(false)));
+    assert_eq!(
+        app.details_toasts.messages(),
+        [(Level::Success, "Saved course.loqr", 1)]
+    );
+    // A message for a window that has closed goes to the main window.
+    app.project_details_open = false;
+    app.from_origin(Origin::Details, |app| app.messages().info("Hello"));
+    assert_eq!(app.toasts.messages().last().unwrap().1, "Hello");
+}
+
+#[test]
+fn storage_errors_are_reported_once() {
+    let mut app = sample_app();
+    app.recent_projects.storage_error = Some("Disk full".into());
+    app.report_storage_errors();
+    app.report_storage_errors();
+    assert_eq!(
+        app.toasts.messages(),
+        [(crate::toasts::Level::Error, "Disk full", 1)]
+    );
 }

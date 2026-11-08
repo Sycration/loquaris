@@ -192,12 +192,16 @@ impl eframe::App for App {
             self.editing_entry = None;
             self.focus_entry = None;
         }
-        if let Some(action) = self.show_windows(ui.ctx()) {
+        let mut origin = crate::app::Origin::Main;
+        if let Some((action, from)) = self.show_windows(ui.ctx()) {
             file_action = Some(action);
+            origin = from;
         }
         if let Some(action) = file_action {
-            self.run_file_action(action, ui.ctx());
+            self.from_origin(origin, |app| app.run_file_action(action, ui.ctx()));
         }
+        self.report_storage_errors();
+        self.toasts.show(ui.ctx());
         if ui.input(|input| input.viewport().close_requested()) && !self.confirm_discard_changes() {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);

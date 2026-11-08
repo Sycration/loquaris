@@ -1,6 +1,6 @@
 //! Undoable commands and the history that records them.
 use super::{App, Position};
-use crate::{Entry, Language, Lesson, Participant, export_pdf, project};
+use crate::{Entry, Language, Lesson, Participant, export_pdf, project, word_index::LemmaChoice};
 use cosmic_undo_2::Action;
 
 #[derive(Clone)]
@@ -55,6 +55,13 @@ pub enum Command {
     MoveEntry {
         from: Position,
         to: Position,
+    },
+    /// Apply a parsing review: the entry's text and chosen lemmas.
+    ApplyReview {
+        lesson: usize,
+        index: usize,
+        before: (String, Vec<LemmaChoice>),
+        after: (String, Vec<LemmaChoice>),
     },
     BulkEntries {
         before: Vec<Vec<Entry>>,
@@ -163,6 +170,7 @@ impl App {
                 *entry,
                 &value.text,
                 value.language,
+                &value.lemmas,
             );
         }
         self.push_history(Command::EditText {
@@ -183,9 +191,10 @@ impl App {
     fn step_history(&mut self, redo: bool) {
         if self
             .audio_editor
-            .as_mut()
-            .is_some_and(|editor| editor.block_history_while_recording())
+            .as_ref()
+            .is_some_and(|editor| editor.is_recording())
         {
+            self.messages().error("Stop recording before undo or redo.");
             return;
         }
         let actions = if redo {
@@ -326,6 +335,24 @@ impl App {
                 let entry = self.lessons[from.0].entries.remove(from.1);
                 self.lessons[to.0].entries.insert(to.1, entry);
             }
+            Command::ApplyReview {
+                lesson,
+                index,
+                before,
+                after,
+            } => {
+                let entry = &mut self.lessons[lesson].entries[index];
+                (entry.text, entry.lemmas) = if forward { after } else { before };
+                self.word_index.update_entry(
+                    &collo::Lemmatizer::new(),
+                    lesson,
+                    index,
+                    &entry.text,
+                    entry.language,
+                    &entry.lemmas,
+                );
+                self.layout_cache_width = f32::NAN;
+            }
             Command::BulkEntries {
                 before,
                 after,
@@ -358,6 +385,7 @@ impl App {
                 entry,
                 &text,
                 value.language,
+                &value.lemmas,
             );
         }
         if let Some(editor) = &mut self.audio_editor

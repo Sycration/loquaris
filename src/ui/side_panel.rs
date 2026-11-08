@@ -379,7 +379,7 @@ fn uses_chart(
     let max = counts.iter().flatten().copied().max().unwrap_or(0);
     let axis_width = 26.0;
     let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), CHART_HEIGHT + 18.0),
+        Vec2::new(ui.available_width(), CHART_HEIGHT + 24.0),
         Sense::click(),
     );
     let painter = ui.painter_at(rect);

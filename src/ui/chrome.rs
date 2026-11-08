@@ -85,29 +85,12 @@ impl App {
             if self.is_dirty() {
                 foreground.push(ui.label("  • Unsaved changes").rect);
             }
-            if self.keybinds.storage_error.is_some() {
-                foreground.push(
-                    ui.colored_label(Color32::LIGHT_RED, "  • Keybind settings error")
-                        .on_hover_text("Open Edit → Keybinds for details.")
-                        .rect,
-                );
-            }
-            if let Some(error) = &self.recent_projects.storage_error {
-                foreground.push(
-                    ui.colored_label(Color32::LIGHT_RED, "Recent projects error")
-                        .on_hover_text(error)
-                        .rect,
-                );
-            }
         });
         file_action
     }
 
-    /// Playback errors, history buttons, and the participant column headings.
+    /// History buttons and the participant column headings.
     pub(super) fn toolbar(&mut self, ui: &mut egui::Ui, width: f32, foreground: &mut Foreground) {
-        if let Some(error) = &self.playback_error {
-            foreground.push(ui.colored_label(Color32::LIGHT_RED, error).rect);
-        }
         ui.allocate_ui_with_layout(
             Vec2::new(width, 26.0),
             egui::Layout::left_to_right(egui::Align::Center),

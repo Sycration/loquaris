@@ -42,6 +42,8 @@ pub struct Entry {
     pub audio: Option<std::sync::Arc<[u8]>>,
     /// The selected part of `audio`; `None` means all of it.
     pub trim: Option<Trim>,
+    /// Lemmas chosen in parsing review for words of this entry.
+    pub lemmas: Vec<crate::word_index::LemmaChoice>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

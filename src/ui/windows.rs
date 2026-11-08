@@ -1,6 +1,6 @@
 //! Child windows of the project: parsing review, recorder, details, and export.
 use crate::{
-    app::{App, Command, FileAction},
+    app::{App, Command, FileAction, Origin},
     keybinds::Action,
     parsing_review,
 };
@@ -13,15 +13,16 @@ fn repaint_after_child_action(ctx: &egui::Context, child: &str) {
 }
 
 impl App {
-    /// Show every open child window, returning a file action one requested.
-    pub(super) fn show_windows(&mut self, ctx: &egui::Context) -> Option<FileAction> {
+    /// Show every open child window, returning a file action one requested
+    /// and the window it came from.
+    pub(super) fn show_windows(&mut self, ctx: &egui::Context) -> Option<(FileAction, Origin)> {
         let mut file_action = None;
         self.show_parsing_review(ctx);
         if let Some(action) = self.show_audio_editor(ctx) {
-            file_action = Some(action);
+            file_action = Some((action, Origin::Recorder));
         }
         if let Some(action) = self.show_project_details(ctx) {
-            file_action = Some(action);
+            file_action = Some((action, Origin::Details));
         }
         self.show_export_window(ctx);
         file_action
@@ -66,7 +67,7 @@ impl App {
                     if *entry != editor.original
                         && (editor.original.audio.clone(), editor.original.trim) != after =>
                 {
-                    Self::show_file_error(
+                    self.toasts.error(
                         "The entry changed while the audio window was open. The clip was not applied.",
                     );
                     valid = false;
@@ -84,8 +85,10 @@ impl App {
         let mut file_action = None;
         for action in outcome.actions {
             match action {
-                Action::Undo => self.undo(),
-                Action::Redo | Action::RedoAlternative => self.redo(),
+                Action::Undo => self.from_origin(Origin::Recorder, Self::undo),
+                Action::Redo | Action::RedoAlternative => {
+                    self.from_origin(Origin::Recorder, Self::redo)
+                }
                 Action::SaveProject => file_action = Some(FileAction::Save),
                 Action::SaveProjectAs => file_action = Some(FileAction::SaveAs),
                 _ => unreachable!("only project actions leave the recorder"),
@@ -114,6 +117,9 @@ impl App {
             self.audio_gaps,
             recording,
         );
+        if let Some(message) = self.export_window.exported.take() {
+            self.toasts.success(message);
+        }
         if self.export_settings != before {
             self.push_history(Command::SetExportSettings {
                 before,
@@ -123,8 +129,10 @@ impl App {
         }
         for action in actions {
             match action {
-                Action::Undo => self.undo(),
-                Action::Redo | Action::RedoAlternative => self.redo(),
+                Action::Undo => self.from_origin(Origin::Export, Self::undo),
+                Action::Redo | Action::RedoAlternative => {
+                    self.from_origin(Origin::Export, Self::redo)
+                }
                 _ => unreachable!("only history actions are dispatched in the export window"),
             }
             repaint_after_child_action(ctx, "export-pdf");

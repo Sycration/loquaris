@@ -17,17 +17,32 @@ pub use layout::entry_column_geometry;
 
 use crate::{
     Lesson, audio, export_pdf, keybinds, lesson_player, parsing_review, project, recent_projects,
-    search, word_index,
+    search, toasts, word_index,
 };
 use cosmic_undo_2::Commands;
 
 /// An entry's position as `(lesson, entry)`.
 pub type Position = (usize, usize);
 
+/// The window an action came from, where its messages are shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Origin {
+    #[default]
+    Main,
+    Recorder,
+    Details,
+    Export,
+}
+
 pub struct App {
     pub audio_editor: Option<audio::Editor>,
     pub lesson_playback: Option<lesson_player::Player>,
-    pub playback_error: Option<String>,
+    /// Messages for the main window.
+    pub toasts: toasts::Toasts,
+    /// Messages for the project details window.
+    pub details_toasts: toasts::Toasts,
+    /// The window the action being handled came from.
+    pub message_origin: Origin,
     pub export_window: export_pdf::Window,
     pub export_settings: export_pdf::Settings,
     pub audio_gaps: project::AudioGaps,
@@ -85,7 +100,9 @@ impl Default for App {
         Self {
             audio_editor: None,
             lesson_playback: None,
-            playback_error: None,
+            toasts: toasts::Toasts::default(),
+            details_toasts: toasts::Toasts::default(),
+            message_origin: Origin::Main,
             export_window: export_pdf::Window::default(),
             export_settings: export_pdf::Settings::default(),
             audio_gaps: project::AudioGaps::default(),
@@ -141,10 +158,46 @@ impl App {
             keybind_editor: std::mem::take(&mut self.keybind_editor),
             recent_projects: std::mem::take(&mut self.recent_projects),
             project_details_open: self.project_details_open,
+            toasts: std::mem::take(&mut self.toasts),
+            details_toasts: std::mem::take(&mut self.details_toasts),
             next_history_token: self.next_history_token,
             search: search::Search::with_options_of(&self.search),
             ..Self::default()
         };
+    }
+
+    /// Messages for the window the current action came from, or the main
+    /// window if that has closed.
+    pub fn messages(&mut self) -> &mut toasts::Toasts {
+        match self.message_origin {
+            Origin::Recorder if self.audio_editor.is_some() => {
+                &mut self.audio_editor.as_mut().unwrap().toasts
+            }
+            Origin::Details if self.project_details_open => &mut self.details_toasts,
+            Origin::Export if self.export_window.open => &mut self.export_window.toasts,
+            _ => &mut self.toasts,
+        }
+    }
+
+    /// Handle an action from `origin`, showing its messages there.
+    pub fn from_origin<T>(&mut self, origin: Origin, action: impl FnOnce(&mut Self) -> T) -> T {
+        let previous = std::mem::replace(&mut self.message_origin, origin);
+        let result = action(self);
+        self.message_origin = previous;
+        result
+    }
+
+    /// Report storage errors not yet shown.
+    pub fn report_storage_errors(&mut self) {
+        for error in [
+            self.keybinds.take_new_storage_error(),
+            self.recent_projects.take_new_storage_error(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.toasts.error(error);
+        }
     }
 
     /// Expand and scroll to the primary selection after a structural change.

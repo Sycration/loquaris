@@ -326,6 +326,7 @@ mod tests {
                         text: text.into(),
                         audio: None,
                         trim: None,
+                        lemmas: Vec::new(),
                     })
                     .collect(),
             })

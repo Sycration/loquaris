@@ -2,6 +2,7 @@
 use eframe::egui::{self, RichText};
 
 use crate::macronize;
+use crate::word_index::{LemmaChoice, OccurrenceCounter};
 
 pub struct Review {
     pub lesson: usize,
@@ -51,6 +52,69 @@ impl Review {
         }
     }
 
+    /// Whether the word's readings belong to more than one lemma, so the
+    /// lemma must be chosen. Written quantities don't narrow them, since they
+    /// may be mistaken.
+    fn lemma_ambiguous(word: &collo::tagging::TaggedWord) -> bool {
+        let lemmas: std::collections::BTreeSet<_> = word
+            .analyses
+            .iter()
+            .map(|analysis| (analysis.lemma.key, analysis.lemma.extension))
+            .collect();
+        lemmas.len() > 1
+    }
+
+    /// Start from the lemmas chosen when this entry was last reviewed, keeping
+    /// the contextual reading if it has the chosen lemma.
+    pub fn prefer_lemmas(&mut self, chosen: &[LemmaChoice]) {
+        let mut occurrences = OccurrenceCounter::new();
+        for (index, word) in self.words.iter().enumerate() {
+            let (key, occurrence) = occurrences.next(&word.text);
+            let Some(choice) = chosen
+                .iter()
+                .find(|choice| choice.token == key && choice.occurrence == occurrence)
+            else {
+                continue;
+            };
+            let has_lemma = |candidate: usize| {
+                let analysis = &word.analyses[candidate];
+                analysis.lemma.key == choice.lemma_key
+                    && analysis.lemma.extension == choice.extension
+                    && macronize::quantity_match(&word.text, analysis)
+                        != macronize::QuantityMatch::Conflict
+                    && macronize::analysis_word(&word.text, analysis, true).is_some()
+            };
+            if !self.choices[index].is_some_and(has_lemma)
+                && let Some(candidate) =
+                    (0..word.analyses.len()).find(|&candidate| has_lemma(candidate))
+            {
+                self.choices[index] = Some(candidate);
+            }
+        }
+    }
+
+    /// The lemmas of the chosen readings of words that need one chosen.
+    pub fn lemma_choices(&self) -> Vec<LemmaChoice> {
+        let mut occurrences = OccurrenceCounter::new();
+        let mut choices = Vec::new();
+        for (index, word) in self.words.iter().enumerate() {
+            let (token, occurrence) = occurrences.next(&word.text);
+            let Some(analysis) = self.choices[index].and_then(|choice| word.analyses.get(choice))
+            else {
+                continue;
+            };
+            if Self::lemma_ambiguous(word) {
+                choices.push(LemmaChoice {
+                    token,
+                    occurrence,
+                    lemma_key: analysis.lemma.key.to_owned(),
+                    extension: analysis.lemma.extension,
+                });
+            }
+        }
+        choices
+    }
+
     fn word_preview(&self, index: usize) -> String {
         let word = &self.words[index];
         self.choices[index]
@@ -72,12 +136,16 @@ impl Review {
     }
 
     /// Return a result only when every available reading of every word produces
-    /// the same safe spelling. Unknown words stay unchanged.
+    /// the same safe spelling and has a single lemma, even when a lemma was
+    /// chosen before, so any ambiguity is reviewed. Unknown words stay unchanged.
     pub fn unambiguous_preview(&self) -> Option<String> {
         let mut text = String::with_capacity(self.original.len());
         let mut cursor = 0;
         for word in &self.words {
             text.push_str(&self.original[cursor..word.range.start]);
+            if Self::lemma_ambiguous(word) {
+                return None;
+            }
             let mut result = None;
             for analysis in &word.analyses {
                 let spelling = macronize::analysis_word(&word.text, analysis, true)?;
@@ -180,15 +248,33 @@ mod tests {
         );
         // Multiple grammatical analyses can still have the same spelling.
         assert_eq!(
-            Review::new(0, 0, "amicas".into())
+            Review::new(0, 0, "aquis".into())
                 .unambiguous_preview()
                 .as_deref(),
-            Some("amīcās")
+            Some("aquīs")
+        );
+        // amīcās is spelled alike as amīca and amīcus, but they are two lemmas.
+        assert_eq!(
+            Review::new(0, 0, "amicas".into()).unambiguous_preview(),
+            None
         );
         assert_eq!(
             Review::new(0, 0, "malum".into()).unambiguous_preview(),
             None
         );
+        // Homographs spelled alike still need a lemma chosen: bellum is
+        // both "war" and the neuter of bellus, "pretty".
+        let mut bellum = Review::new(0, 0, "bellum".into());
+        assert_eq!(bellum.unambiguous_preview(), None);
+        bellum.prefer_lemmas(&[LemmaChoice {
+            token: "bellum".into(),
+            occurrence: 0,
+            lemma_key: "bellum".into(),
+            extension: false,
+        }]);
+        // A lemma chosen before is preselected, but still reviewed.
+        assert_eq!(bellum.lemma_choices()[0].lemma_key, "bellum");
+        assert_eq!(bellum.unambiguous_preview(), None);
         assert_eq!(
             Review::new(0, 0, "xyzzy".into())
                 .unambiguous_preview()

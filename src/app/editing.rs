@@ -1,5 +1,5 @@
 //! Script editing operations, each recorded as an undoable command.
-use super::{App, Command, Position, TextTarget};
+use super::{App, Command, Position};
 use crate::{Entry, Language, Lesson, Participant, keybinds, parsing_review};
 use std::collections::BTreeSet;
 
@@ -85,6 +85,7 @@ impl App {
             participant,
             language,
             text: String::new(),
+            lemmas: Vec::new(),
         };
         lesson.entries.insert(entry_index, entry.clone());
         self.word_index.rebuild(&self.lessons);
@@ -387,7 +388,8 @@ impl App {
         }
         let text = entry.text.clone();
         let words = self.word_index.tag_text(&collo::Lemmatizer::new(), &text);
-        let review = parsing_review::Review::from_tagged_words(lesson, index, text, words);
+        let mut review = parsing_review::Review::from_tagged_words(lesson, index, text, words);
+        review.prefer_lemmas(&entry.lemmas);
         if let Some(after) = review.unambiguous_preview() {
             if review.original == after {
                 return false;
@@ -438,22 +440,28 @@ impl App {
         self.entry_action(lesson, index, action)
     }
 
-    /// Apply a reviewed macronization unless the entry changed meanwhile.
+    /// Apply a reviewed macronization and its lemma choices, unless the
+    /// entry changed meanwhile.
     pub fn apply_review(&mut self, review: &parsing_review::Review, after: String) {
-        if let Some(entry) = self
+        let Some(entry) = self
             .lessons
-            .get_mut(review.lesson)
-            .and_then(|lesson| lesson.entries.get_mut(review.entry))
-            && entry.language == Language::Latin
-            && entry.text == review.original
-            && entry.text != after
-        {
-            let before = std::mem::replace(&mut entry.text, after.clone());
-            self.record_text(
-                TextTarget::Entry(review.lesson, review.entry),
-                before,
-                after,
-            );
+            .get(review.lesson)
+            .and_then(|lesson| lesson.entries.get(review.entry))
+        else {
+            return;
+        };
+        if entry.language != Language::Latin || entry.text != review.original {
+            return;
         }
+        let lemmas = review.lemma_choices();
+        if entry.text == after && entry.lemmas == lemmas {
+            return;
+        }
+        self.execute(Command::ApplyReview {
+            lesson: review.lesson,
+            index: review.entry,
+            before: (entry.text.clone(), entry.lemmas.clone()),
+            after: (after, lemmas),
+        });
     }
 }

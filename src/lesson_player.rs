@@ -165,6 +165,7 @@ mod tests {
             text: String::new(),
             audio: Some(clip()),
             trim: None,
+            lemmas: Vec::new(),
         })
         .collect();
         Lesson {

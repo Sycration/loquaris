@@ -64,6 +64,49 @@ pub(crate) struct PersistedAnalysis {
     pub(crate) multiplicity: u32,
 }
 
+/// The lemma chosen in parsing review for one occurrence of a word in an
+/// entry: the `occurrence`th (from zero) word in the entry spelled `token`.
+/// Counting only words of the same spelling keeps the choice attached while
+/// other words are edited, and one spelling can be different words in the
+/// same entry: dum bellum geritur, pilum bellum feret miles.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LemmaChoice {
+    /// The spelling as keyed by [`lemma_choice_key`].
+    pub token: String,
+    pub occurrence: u32,
+    pub lemma_key: String,
+    pub extension: bool,
+}
+
+/// Choices ignore quantity marks and case, so they survive macronization;
+/// a reading that conflicts with written marks is never chosen.
+pub fn lemma_choice_key(token: &str) -> String {
+    collo::normalize(token).to_lowercase()
+}
+
+/// Number each word by how many earlier words in the text share its spelling,
+/// as [`LemmaChoice::occurrence`] does.
+/// Entries are short, so a list is quicker than hashing.
+pub struct OccurrenceCounter(Vec<(String, u32)>);
+
+impl OccurrenceCounter {
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// The word's key and occurrence number.
+    pub fn next(&mut self, token: &str) -> (String, u32) {
+        let key = lemma_choice_key(token);
+        if let Some((_, count)) = self.0.iter_mut().find(|(seen, _)| *seen == key) {
+            let occurrence = *count;
+            *count += 1;
+            return (key, occurrence);
+        }
+        self.0.push((key.clone(), 1));
+        (key, 0)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct IndexedToken {
     range_start: u32,
@@ -72,6 +115,8 @@ struct IndexedToken {
     surface_position: u32,
     analysis: u32,
     selected_lemma: u32,
+    /// `selected_lemma` was chosen by the user, so it is the only reading.
+    chosen: bool,
 }
 
 struct SurfaceRecord {
@@ -118,6 +163,11 @@ pub struct WordIndex {
     entry_ids: Vec<Vec<u32>>,
     entry_coordinates: Vec<(u32, u32)>,
     surfaces: Vec<SurfaceRecord>,
+    /// Each spelling's [`lemma_choice_key`] as an ID, computed when first
+    /// needed, so numbering words for lemma choices doesn't allocate.
+    surface_choice_keys: Vec<u32>,
+    choice_key_ids: HashMap<String, u32>,
+    choice_keys: Vec<String>,
     by_surface: HashMap<std::sync::Arc<str>, u32>,
     by_normalized_surface: HashMap<std::sync::Arc<str>, u32>,
     normalized_surface_collisions: HashMap<std::sync::Arc<str>, Vec<u32>>,
@@ -136,6 +186,38 @@ impl WordIndex {
         index
     }
 
+    fn choice_key_id(&mut self, key: &str) -> u32 {
+        if let Some(&id) = self.choice_key_ids.get(key) {
+            return id;
+        }
+        let id = u32::try_from(self.choice_keys.len()).expect("too many unique spellings");
+        self.choice_key_ids.insert(key.to_owned(), id);
+        self.choice_keys.push(key.to_owned());
+        id
+    }
+
+    fn surface_choice_key(&mut self, surface: u32, text: &str) -> u32 {
+        let surface = surface as usize;
+        if self.surface_choice_keys.len() <= surface {
+            self.surface_choice_keys.resize(surface + 1, NO_ID);
+        }
+        if self.surface_choice_keys[surface] == NO_ID {
+            self.surface_choice_keys[surface] = self.choice_key_id(&lemma_choice_key(text));
+        }
+        self.surface_choice_keys[surface]
+    }
+
+    /// The lemma chosen for an occurrence, if its written quantities allow it.
+    fn chosen_lemma(&self, choice: &LemmaChoice, analysis: u32) -> Option<u32> {
+        self.analysis_lemmas[analysis as usize]
+            .iter()
+            .copied()
+            .find(|&id| {
+                let lemma = self.lemmas[id as usize];
+                lemma.key == choice.lemma_key && lemma.extension == choice.extension
+            })
+    }
+
     fn load_cache(&mut self, cache: &PersistedCache) {
         if cache.schema_version != CACHE_SCHEMA_VERSION
             || cache.fingerprint != collo::ANALYSIS_CACHE_FINGERPRINT
@@ -146,9 +228,7 @@ impl WordIndex {
             let mut analyses = Vec::with_capacity(word.analyses.len());
             let mut valid = true;
             for stored in &word.analyses {
-                let Some(lemma) = collo::lemmas().iter().find(|lemma| {
-                    lemma.key == stored.lemma_key && lemma.extension == stored.extension
-                }) else {
+                let Some(lemma) = collo::find_lemma(&stored.lemma_key, stored.extension) else {
                     valid = false;
                     break;
                 };
@@ -366,6 +446,7 @@ impl WordIndex {
                     entry_index,
                     &entry.text,
                     entry.language,
+                    &entry.lemmas,
                 );
             }
         }
@@ -444,6 +525,7 @@ impl WordIndex {
         entry: usize,
         text: &str,
         language: Language,
+        lemmas: &[LemmaChoice],
     ) {
         let entry_id = self.ensure_entry_id(lesson, entry);
         let mut old = std::mem::take(&mut self.entries[lesson][entry]);
@@ -515,9 +597,32 @@ impl WordIndex {
             } else {
                 NO_ID
             };
+            // Most entries have no chosen lemmas, so don't number their words.
+            let chosen = if lemmas.is_empty() {
+                None
+            } else {
+                let key = self.surface_choice_key(surface_id, token_text);
+                let key_text = &self.choice_keys[key as usize];
+                if lemmas.iter().any(|choice| choice.token == *key_text) {
+                    // Entries are short, so count earlier words of this spelling.
+                    let occurrence = indexed
+                        .iter()
+                        .filter(|earlier: &&IndexedToken| {
+                            self.surface_choice_keys.get(earlier.surface as usize) == Some(&key)
+                        })
+                        .count() as u32;
+                    lemmas
+                        .iter()
+                        .find(|choice| choice.occurrence == occurrence && choice.token == *key_text)
+                        .filter(|_| analysis != NO_ID)
+                        .and_then(|choice| self.chosen_lemma(choice, analysis))
+                } else {
+                    None
+                }
+            };
             let selected_lemma = if analysis != NO_ID {
                 self.analysis_users[analysis as usize] += 1;
-                self.analysis_selected_lemma[analysis as usize]
+                chosen.unwrap_or(self.analysis_selected_lemma[analysis as usize])
             } else {
                 NO_ID
             };
@@ -528,12 +633,12 @@ impl WordIndex {
             let mut new_surface_lemmas = Vec::new();
             if analysis != NO_ID {
                 let lemma_ids = self.analysis_lemmas[analysis as usize].clone();
-                for lemma_id in lemma_ids.iter().copied() {
+                for lemma_id in lemma_ids.iter().copied().chain(chosen) {
                     let already_present = self.surfaces[surface_id as usize]
                         .lemmas
                         .as_ref()
                         .is_some_and(|lemmas| lemmas.contains(&lemma_id));
-                    if !already_present {
+                    if !already_present && !new_surface_lemmas.contains(&lemma_id) {
                         new_surface_lemmas.push(lemma_id);
                     }
                 }
@@ -577,6 +682,7 @@ impl WordIndex {
                 surface_position,
                 analysis,
                 selected_lemma,
+                chosen: chosen.is_some(),
             });
         }
         self.entries[lesson][entry] = indexed;
@@ -720,10 +826,14 @@ impl WordIndex {
                         let entry_id = (packed >> 32) as usize;
                         let (lesson, entry) = self.entry_coordinates[entry_id];
                         let token = &self.entries[lesson as usize][entry as usize][token_index];
-                        let has_lemma = token.analysis != NO_ID
-                            && lemma_sets[token.analysis as usize]
-                                .iter()
-                                .any(|&lemma| self.lemmas[lemma as usize].key == lemma_key);
+                        let has_lemma = if token.chosen {
+                            self.lemmas[token.selected_lemma as usize].key == lemma_key
+                        } else {
+                            token.analysis != NO_ID
+                                && lemma_sets[token.analysis as usize]
+                                    .iter()
+                                    .any(|&lemma| self.lemmas[lemma as usize].key == lemma_key)
+                        };
                         has_lemma.then_some(occurrence)
                     })
             })
@@ -773,6 +883,7 @@ mod tests {
                     text: (*text).into(),
                     audio: None,
                     trim: None,
+                    lemmas: Vec::new(),
                 })
                 .collect(),
         }
@@ -811,6 +922,7 @@ mod tests {
             0,
             "Virumque amat",
             Language::Latin,
+            &[],
         );
         assert_eq!(index.surface_count("Puella"), 0);
         assert_eq!(index.possible_lemma_count("puella"), 0);
@@ -902,6 +1014,7 @@ mod tests {
             0,
             "Puer venit.",
             Language::Latin,
+            &[],
         );
         assert!(!index.first_use_lemmas(0, 0).contains(&headword("puella")));
         assert!(index.first_use_lemmas(0, 1).contains(&headword("puella")));

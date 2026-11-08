@@ -250,6 +250,7 @@ mod tests {
                         text: String::new(),
                         audio: Some(clip(8000, 1, 12000)),
                         trim: None,
+                        lemmas: Vec::new(),
                     },
                     Entry {
                         participant: Participant::Student,
@@ -257,6 +258,7 @@ mod tests {
                         text: String::new(),
                         audio: Some(clip(16000, 2, -12000)),
                         trim: None,
+                        lemmas: Vec::new(),
                     },
                 ],
             },
@@ -269,6 +271,7 @@ mod tests {
                     text: String::new(),
                     audio: Some(clip(48000, 1, 6000)),
                     trim: None,
+                    lemmas: Vec::new(),
                 }],
             },
         ]

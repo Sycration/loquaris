@@ -49,6 +49,8 @@ pub struct Registry {
     path: Option<PathBuf>,
     stored: BTreeMap<String, StoredShortcut>,
     pub storage_error: Option<String>,
+    /// The storage error last shown, so each is reported once.
+    reported_error: Option<String>,
     blocked: bool,
 }
 
@@ -318,12 +320,22 @@ impl Default for Registry {
             path: None,
             stored: BTreeMap::new(),
             storage_error: None,
+            reported_error: None,
             blocked: false,
         }
     }
 }
 
 impl Registry {
+    /// The storage error if it hasn't been reported yet, marking it reported.
+    pub fn take_new_storage_error(&mut self) -> Option<String> {
+        if self.storage_error == self.reported_error {
+            return None;
+        }
+        self.reported_error = self.storage_error.clone();
+        self.storage_error.clone()
+    }
+
     pub fn load_user() -> Self {
         match directories::ProjectDirs::from("", "", "loquaris") {
             Some(dirs) => Self::load_from(&dirs.config_dir().join("keybinds.toml")),
@@ -425,6 +437,8 @@ impl Registry {
         let Some(path) = self.path.as_ref() else {
             return;
         };
+        // Every failed attempt is reported, even with the same error.
+        self.reported_error = None;
         let save = (|| -> Result<BTreeMap<String, StoredShortcut>, String> {
             let mut bindings = self.stored.clone();
             for binding in &self.bindings {
@@ -570,7 +584,8 @@ impl Registry {
 pub struct Editor {
     pub open: bool,
     recording: Option<usize>,
-    error: Option<&'static str>,
+    /// Messages shown in the keybinds window.
+    toasts: crate::toasts::Toasts,
 }
 
 impl Editor {
@@ -616,7 +631,6 @@ impl Editor {
                     if let Some((key, mut modifiers)) = key {
                         if key == Key::Escape {
                             self.recording = None;
-                            self.error = None;
                         } else {
                             // Represent the platform's primary modifier portably.
                             if modifiers.command {
@@ -626,11 +640,10 @@ impl Editor {
                             match registry.set(index, KeyboardShortcut::new(modifiers, key)) {
                                 Ok(()) => {
                                     self.recording = None;
-                                    self.error = None;
                                     registry.persist();
                                     ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
                                 }
-                                Err(error) => self.error = Some(error),
+                                Err(error) => self.toasts.error(error),
                             }
                         }
                     }
@@ -680,19 +693,13 @@ impl Editor {
                                         .clicked()
                                     {
                                         self.recording = Some(index);
-                                        self.error = None;
                                     }
                                     ui.end_row();
                                 }
                             });
 
-                        if let Some(error) = self.error {
+                        if registry.storage_error.is_some() {
                             ui.add_space(6.0);
-                            ui.colored_label(egui::Color32::LIGHT_RED, error);
-                        }
-                        if let Some(error) = &registry.storage_error {
-                            ui.add_space(6.0);
-                            ui.colored_label(egui::Color32::LIGHT_RED, error);
                             if !registry.blocked && ui.button("Retry saving").clicked() {
                                 registry.persist();
                                 ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
@@ -704,10 +711,14 @@ impl Editor {
                             registry.persist();
                             ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
                             self.recording = None;
-                            self.error = None;
+                            self.toasts.info("Restored the default keybinds.");
                         }
                     });
                 });
+                if let Some(error) = registry.take_new_storage_error() {
+                    self.toasts.error(error);
+                }
+                self.toasts.show(ui.ctx());
             },
         );
         if !self.open {

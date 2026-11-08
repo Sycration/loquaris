@@ -25,11 +25,22 @@ struct Settings {
 pub struct RecentProjects {
     pub projects: Vec<RecentProject>,
     pub storage_error: Option<String>,
+    /// The storage error last shown, so each is reported once.
+    reported_error: Option<String>,
     path: Option<PathBuf>,
     blocked: bool,
 }
 
 impl RecentProjects {
+    /// The storage error if it hasn't been reported yet, marking it reported.
+    pub fn take_new_storage_error(&mut self) -> Option<String> {
+        if self.storage_error == self.reported_error {
+            return None;
+        }
+        self.reported_error = self.storage_error.clone();
+        self.storage_error.clone()
+    }
+
     pub fn load_user() -> Self {
         match directories::ProjectDirs::from("", "", "loquaris") {
             Some(dirs) => Self::load_from(&dirs.config_dir().join("recent-projects.toml")),
@@ -100,6 +111,8 @@ impl RecentProjects {
         let Some(path) = &self.path else {
             return;
         };
+        // Every failed attempt is reported, even with the same error.
+        self.reported_error = None;
         let result = (|| -> Result<(), String> {
             let contents = toml::to_string_pretty(&Settings {
                 version: 1,

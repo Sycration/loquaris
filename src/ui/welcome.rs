@@ -4,7 +4,7 @@ use crate::{
     app::{App, FileAction},
     model::display_name,
 };
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, RichText};
 
 impl App {
     pub(super) fn welcome(&mut self, ui: &mut egui::Ui) {
@@ -44,12 +44,6 @@ impl App {
             ui.add_space(20.0);
             ui.label(RichText::new("Recent projects").strong());
             ui.add_space(8.0);
-            if let Some(error) = &self.recent_projects.storage_error {
-                ui.colored_label(Color32::LIGHT_RED, error);
-            }
-            if let Some(error) = &self.keybinds.storage_error {
-                ui.colored_label(Color32::LIGHT_RED, error);
-            }
             if self.recent_projects.projects.is_empty() {
                 ui.label("No recent projects yet.");
                 return;
@@ -89,6 +83,8 @@ impl App {
         if let Some(action @ (FileAction::New | FileAction::Open)) = file_action {
             self.run_file_action(action, ui.ctx());
         }
+        self.report_storage_errors();
+        self.toasts.show(ui.ctx());
         if self.project_open {
             ui.ctx().request_repaint();
         }
