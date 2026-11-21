@@ -281,7 +281,11 @@ fn main() {
     let mut keys = HashMap::new();
     let mut stems = Vec::new();
     let mut lemmas = Vec::new();
-    for (extension, path) in [(false, "data/lemmes.la"), (true, "data/lem_ext.la")] {
+    // The extension lexicon is rare words; leaving it out (without the
+    // `extension` feature) makes the library much smaller.
+    let include_extension = env::var_os("CARGO_FEATURE_EXTENSION").is_some();
+    let lexicons = [(false, "data/lemmes.la"), (true, "data/lem_ext.la")];
+    for (extension, path) in lexicons.into_iter().filter(|(ext, _)| include_extension || !ext) {
         for line in lines(path) {
             let fields: Vec<_> = line.split('|').collect();
             assert!(fields.len() >= 6, "{line}");

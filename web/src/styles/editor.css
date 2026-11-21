@@ -1,0 +1,116 @@
+/* The script editor. */
+.editor { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+.editor-header { flex: none; display: flex; align-items: center; gap: 12px; height: 52px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.editor-header__title { border: 0; background: none; font-size: 16px; font-weight: 600; padding: 4px 8px; border-radius: var(--radius); cursor: pointer; max-width: 36vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-header__title:hover { background: var(--surface-3); }
+.editor-header__end { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.status { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-muted); white-space: nowrap; }
+.status__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); }
+.status--saved .status__dot { background: var(--success); }
+.status--saving .status__dot, .status--connecting .status__dot { background: #e0b84a; animation: pulse 1.2s ease-in-out infinite; }
+.status--offline .status__dot, .status--closed .status__dot { background: var(--danger); }
+.status--offline, .status--closed { color: #ffbcbc; }
+@keyframes pulse { 50% { opacity: .35; } }
+.presence { display: flex; align-items: center; }
+.presence__person { position: relative; border: 2px solid var(--surface); border-radius: 50%; padding: 0; background: none; margin-left: -6px; cursor: pointer; }
+.presence__recording { position: absolute; right: -2px; bottom: -2px; width: 10px; height: 10px; border-radius: 50%; background: var(--danger); border: 2px solid var(--surface); }
+
+.editor__main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
+.editor__main--with-panel { grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); }
+.editor__script { min-height: 0; display: flex; flex-direction: column; }
+.side-panel { min-height: 0; overflow: auto; border-left: 1px solid var(--border); background: var(--surface); padding: 16px; display: grid; align-content: start; gap: 20px; }
+
+.script { flex: 1; min-height: 0; display: flex; flex-direction: column; width: 100%; max-width: 1180px; margin: 0 auto; }
+.script__toolbar { flex: none; display: flex; align-items: center; gap: 6px; padding: 12px 20px 6px; }
+.script__headings { flex: none; display: grid; grid-template-columns: 1fr 1fr; padding: 0 20px 8px; border-bottom: 2px solid var(--divider); }
+.script__heading { font-size: 30px; font-weight: 600; line-height: 1.2; }
+.script__heading--latin { font-family: var(--font-latin); text-align: right; }
+.script__scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 20px 24px; overscroll-behavior: contain;
+  background: linear-gradient(var(--divider), var(--divider)) center / 2px 100% no-repeat local; }
+
+/* Lessons */
+.lesson { position: relative; }
+.lesson-header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 6px; min-height: 34px; padding: 2px 6px; margin-top: 12px; background: var(--lesson-bar); border: 1px solid var(--lesson-bar-border); border-radius: var(--radius-sm); box-shadow: 0 6px 10px -6px rgb(0 0 0 / .6); cursor: default; }
+.lesson-header__toggle { color: var(--text); }
+.lesson-header__name { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; }
+.lesson-header__number { font-weight: 700; white-space: nowrap; }
+.lesson-header__input { flex: 1; min-width: 0; }
+.lesson-header__text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lesson-header__summary { font-size: 12px; white-space: nowrap; color: var(--text); font-variant-numeric: tabular-nums; padding: 0 4px; }
+.lesson-header__summary--incomplete { color: var(--text-muted); }
+.lesson-header__play { color: var(--text); }
+.lesson__body { padding: 6px 0; }
+.lesson__empty { text-align: center; color: var(--text-faint); padding: 16px; font-size: 14px; background: var(--bg); position: relative; }
+.lesson-footer { display: flex; width: 100%; align-items: center; justify-content: space-between; height: 26px; padding: 0 8px; margin-bottom: 4px; border: 1px solid var(--lesson-bar-border); border-radius: var(--radius-sm); background: var(--lesson-bar); cursor: pointer; font-size: 13.5px; text-align: left; }
+.lesson-footer__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lesson-footer:hover { filter: brightness(1.12); }
+
+/* Rows: one entry per row, in its participant's column. Off-screen rows
+   skip layout and paint (content-visibility), keeping long scripts fast.
+   That clips painting to the row, so the top padding leaves room for the
+   name tags of collaborators, which straddle the card's top edge, and the
+   bottom padding for the 2px focus rings. */
+.script-row { display: grid; grid-template-columns: 1fr 1fr; column-gap: 28px; padding: 7px 0 2px; content-visibility: auto; contain-intrinsic-size: auto 84px; }
+
+.card { position: relative; grid-column: 1; min-width: 0; padding: 6px 8px 8px; border: 1px solid var(--card-border); border-radius: var(--radius-sm); background: var(--l1-fill); cursor: default; transition: background .1s, box-shadow .1s; }
+.card--student { grid-column: 2; }
+.card--latin { background: var(--latin-fill); }
+.card--l1.card--selected { background: var(--l1-fill-selected); }
+.card--latin.card--selected { background: var(--latin-fill-selected); }
+.card--selected { border-color: #fff; }
+.card--editing { box-shadow: 0 0 0 2px rgb(255 255 255 / .2); }
+.card--remote { box-shadow: 0 0 0 2px var(--remote-color); }
+.card__top { display: flex; align-items: center; gap: 8px; min-height: 18px; margin-bottom: 4px; padding-right: 64px; }
+.card--student .card__top { flex-direction: row-reverse; }
+.card__label { font-size: 12px; font-weight: 600; color: var(--l1-accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card--latin .card__label { color: var(--latin-accent); font-family: var(--font-latin); }
+.card__decorations { flex: 1; min-width: 0; display: flex; gap: 6px; justify-content: flex-end; }
+.card--student .card__decorations { justify-content: flex-start; }
+.card__decorations:empty { display: none; }
+.card__text, .text-editor__mirror, .text-editor__input {
+  font: var(--text-size) / 1.45 var(--font-sans); white-space: pre-wrap; overflow-wrap: anywhere; color: #fff; min-height: 1.45em;
+}
+.card--latin .card__text, .card--latin .text-editor__mirror, .card--latin .text-editor__input { font-family: var(--font-latin); font-size: 16px; }
+.placeholder { color: rgb(255 255 255 / .45); }
+.search-hit { color: var(--search-hit); text-decoration: underline; text-decoration-color: var(--search-hit); }
+.card__actions { position: absolute; top: 3px; right: 3px; display: flex; gap: 2px; opacity: 0; transition: opacity .1s; }
+.card:hover .card__actions, .card:focus-within .card__actions, .card--selected .card__actions { opacity: 1; }
+.card__action { display: grid; place-items: center; width: 30px; height: 28px; border-radius: var(--radius-sm); border: 0; background: rgb(0 0 0 / .25); color: #fff; font-size: 17px; cursor: pointer; }
+.card__action:hover { background: rgb(0 0 0 / .45); }
+.card__action--active { color: var(--l1-accent); }
+.card--latin .card__action--active { color: var(--latin-accent); }
+.card__audio-marker { position: absolute; top: 2px; bottom: 2px; width: 4px; right: -8px; background: var(--audio-marker); border-radius: 1px; }
+.card--student .card__audio-marker { right: auto; left: -8px; }
+.card__peers { position: absolute; top: -7px; right: 8px; display: flex; gap: 4px; pointer-events: none; }
+.card__peer { --peer-color: #888; font-size: 11px; line-height: 14px; padding: 0 6px; border-radius: 4px; background: var(--peer-color); color: #111; font-weight: 600; white-space: nowrap; }
+.card__recording { display: inline-block; margin-top: 4px; font-size: 12px; color: #ffb3b3; }
+
+/* Text editing: a mirror in normal flow sizes the box; the textarea sits on
+   top with transparent background, so remote selections drawn in the mirror
+   show through and the editor grows with its content. */
+.text-editor { position: relative; }
+.text-editor__mirror { color: transparent; pointer-events: none; user-select: none; }
+.text-editor__input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; background: transparent; resize: none; overflow: hidden; outline: none; caret-color: #fff; }
+.text-editor__input::placeholder { color: rgb(255 255 255 / .45); }
+.text-editor--single .text-editor__mirror, .text-editor--single .text-editor__input { font-family: var(--font-sans); font-size: var(--text-size); }
+.remote-caret { position: relative; display: inline-block; width: 0; height: 1.2em; vertical-align: text-bottom; }
+.remote-caret::before { content: ''; position: absolute; left: -1px; top: 0; bottom: 0; width: 2px; background: var(--caret-color); }
+.remote-caret__flag { position: absolute; left: -1px; bottom: 100%; padding: 0 4px; font: 600 10px/14px var(--font-sans); color: #111; background: var(--caret-color); border-radius: 3px 3px 3px 0; white-space: nowrap; opacity: .9; z-index: 1; }
+
+/* Add-entry bar */
+.add-bar { flex: none; border-top: 2px solid var(--divider); padding: 8px 20px 12px; background: var(--bg); }
+.add-bar__target { color: var(--text-muted); font-size: 13.5px; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.add-bar__buttons { display: grid; grid-template-columns: 1fr 1fr; }
+.add-bar__side { display: flex; gap: 12px; padding-left: 10px; }
+.add-bar__side--student { justify-content: flex-end; padding-right: 10px; }
+.add-button { height: 34px; padding: 0 16px; border-radius: var(--radius); border: 1px solid var(--card-border); font-weight: 600; cursor: pointer; }
+.add-button--l1 { background: var(--l1-fill); color: var(--l1-accent); }
+.add-button--latin { background: var(--latin-fill); color: var(--latin-accent); }
+.add-button:hover { filter: brightness(1.25); }
+
+@media (max-width: 1100px) {
+  .editor__main--with-panel { grid-template-columns: minmax(0, 1fr) 300px; }
+  .script__heading { font-size: 24px; }
+  .status { font-size: 0; gap: 0; }
+  .status__dot { width: 10px; height: 10px; }
+}

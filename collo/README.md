@@ -47,7 +47,10 @@ lowercase word.
 **Lemmas.** Each `Lemma` has its headword, its translations, its frequency, and
 the dictionary's grammatical notes. `lemmas()` lists all of them, and
 `Lemmatizer::inflect` generates every form of one. An extra, less common
-lexicon is available if you set `include_extension` on the `Lemmatizer`.
+lexicon is available if you set `include_extension` on the `Lemmatizer`. It
+holds about 70% of the lemmas and comes with the default `extension` cargo
+feature; without that feature (`default-features = false`) the library is
+less than half the size, which matters when compiling to WebAssembly.
 
 **Tagging.** `tag_text` selects the most likely reading of each word from its
 context, using word frequencies from the LASLA corpus. `tag_text_with` does the

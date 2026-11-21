@@ -1,0 +1,9 @@
+target/
+web/node_modules/
+web/dist/
+web/src/wasm/pkg/
+legacy/
+data/
+.git/
+web/test-results/
+web/playwright-report/

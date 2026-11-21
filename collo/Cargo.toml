@@ -5,3 +5,9 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 
 [dependencies]
+
+[features]
+default = ["extension"]
+# The extension lexicon of rare words, used when `Lemmatizer::include_extension`
+# is set. Without it the library is much smaller and the option has no effect.
+extension = []

@@ -1,0 +1,35 @@
+[package]
+name = "loquaris-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+loquaris-core.workspace = true
+loquaris-export.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+anyhow = "1"
+argon2 = "0.6"
+axum = { version = "0.8", features = ["ws", "macros"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+getrandom = { version = "0.4", features = ["std"] }
+hex = "0.4"
+mime_guess = "2"
+rust-embed = { version = "8", features = ["mime-guess"] }
+sha2 = "0.11"
+sqlx = { version = "0.9", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.7", features = ["trace", "compression-br", "compression-gzip"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+yrs = { version = "0.28", features = ["sync"] }
+zip = { version = "9", default-features = false }
+
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["cookies", "json", "query"] }
+tempfile = "3"
+tokio-tungstenite = "0.30"

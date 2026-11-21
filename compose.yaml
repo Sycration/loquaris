@@ -1,0 +1,19 @@
+# Loquaris with Docker Compose:  docker compose up -d
+# Put it behind an HTTPS reverse proxy that passes WebSocket upgrades, and set
+# LOQ_PUBLIC_URL to the address people use.
+services:
+  loquaris:
+    build: .
+    image: loquaris
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      LOQ_PUBLIC_URL: http://localhost:8080
+      LOQ_REGISTRATION: open        # open | invite | closed
+      # LOQ_TRUST_PROXY: "1"        # behind a reverse proxy
+    volumes:
+      - loquaris-data:/data         # database and audio; back this up
+
+volumes:
+  loquaris-data:

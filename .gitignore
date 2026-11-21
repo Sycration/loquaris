@@ -18,3 +18,12 @@ rustc-ice-*.txt
 
 # python scripts
 __pycache__/
+
+# web
+node_modules/
+web/dist/
+web/src/wasm/pkg/
+/data/
+*.sqlite*
+web/test-results/
+web/playwright-report/
