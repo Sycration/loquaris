@@ -72,6 +72,7 @@ impl AppState {
     pub async fn open(config: Config) -> anyhow::Result<Self> {
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("cannot create {}", config.data_dir.display()))?;
+        check_writable(&config.data_dir)?;
         let db = db::open(&config.database_path()).await?;
         let blobs = FsBlobStore::new(config.blob_dir()).context("cannot create the blob directory")?;
         let config = Arc::new(config);
@@ -83,6 +84,30 @@ impl AppState {
             limiter: Limiter::default(),
         })))
     }
+}
+
+/// Fails with an explanation when the data directory can't be written,
+/// which SQLite would otherwise report only as "unable to open database
+/// file". Usually the directory belongs to another user, as with volumes
+/// created by a NAS.
+fn check_writable(dir: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let probe = dir.join(".loquaris-write-test");
+    let Err(error) = std::fs::write(&probe, b"").and_then(|()| std::fs::remove_file(&probe)) else {
+        return Ok(());
+    };
+    // /proc/self belongs to the process's own user.
+    let me = std::fs::metadata("/proc/self").map(|m| format!("{}:{}", m.uid(), m.gid()));
+    let owner = std::fs::metadata(dir).map(|m| format!("{}:{}", m.uid(), m.gid()));
+    anyhow::bail!(
+        "cannot write to the data directory {} ({error}). The server runs as user {} and the \
+         directory belongs to {}. Give the server's user write access to it, or run the server \
+         as the directory's owner (in Docker, set LOQ_UID and LOQ_GID).",
+        dir.display(),
+        me.as_deref().unwrap_or("?"),
+        owner.as_deref().unwrap_or("?"),
+    )
 }
 
 /// The whole application: `/api` and the web app.

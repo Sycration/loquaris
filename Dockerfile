@@ -28,19 +28,22 @@ COPY --from=web /src/web/dist ./web/dist
 RUN cargo build --release -p loquaris-server \
     && cp target/release/loquaris-server /usr/local/bin/
 
-# 4. Runtime.
+# 4. Runtime. The entry point starts as root only to hand /data to the
+# server's user (LOQ_UID:LOQ_GID), then runs the server as that user; see
+# scripts/docker-entrypoint.sh.
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --home /data --shell /usr/sbin/nologin loquaris \
-    && mkdir /data && chown loquaris /data
+    && mkdir /data && chown 1000:1000 /data
 COPY --from=server /usr/local/bin/loquaris-server /usr/local/bin/
-USER loquaris
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 ENV LOQ_BIND=0.0.0.0:8080 \
     LOQ_DATA_DIR=/data \
     LOQ_PUBLIC_URL=http://localhost:8080 \
-    LOQ_REGISTRATION=open
+    LOQ_REGISTRATION=open \
+    LOQ_UID=1000 \
+    LOQ_GID=1000
 VOLUME /data
 EXPOSE 8080
-ENTRYPOINT ["loquaris-server"]
+ENTRYPOINT ["docker-entrypoint"]
 CMD ["serve"]
